@@ -1,0 +1,39 @@
+{
+  "description": "Hand-authored retrieval sanity set. Each query has one labelled passage; not a benchmark of the user's documents.",
+  "cases": [
+    {"query":"Can I still find my files when the network drive is disconnected?","text":"Offline search retains previously indexed filenames and passages from an unavailable NAS. Reconnecting the share restores access to the original files."},
+    {"query":"Where did we explain why the launcher's missing my locally built app?","text":"Application discovery only scanned the standard Applications directories. A development bundle stored inside a project's dist directory was registered with macOS but absent from our app catalog."},
+    {"query":"Which report explains the money we spent above the plan?","text":"The quarterly budget variance report compares actual expenditure with approved forecasts. Contractor fees and equipment purchases account for most of the overspend."},
+    {"query":"How do I get back text that I accidentally erased?","text":"Document version history retains earlier revisions. Select a saved revision and restore it to recover a deleted paragraph or an accidental edit."},
+    {"query":"What happens if indexing crashes in the middle?","text":"Filesystem events and their checkpoint commit together in a durable queue. After an unexpected shutdown, workers replay pending changes and acknowledge only successfully completed work."},
+    {"query":"Who agreed to do the remaining work before launch?","text":"The meeting minutes assign release tasks to owners. Priya will finish the onboarding copy, Mateo will validate exports, and Sam will resolve the final accessibility defects."},
+    {"query":"What did the experiment show after accounting for differences between groups?","text":"The analysis estimated the adjusted association using a regression model with baseline covariates. The sensitivity analysis repeated the estimate after excluding incomplete observations."},
+    {"query":"Why did the paper get sent back instead of accepted?","text":"The editor requested major revisions. Reviewers asked for clearer inclusion criteria, additional robustness checks, and a discussion of limitations before reconsidering the manuscript."},
+    {"query":"How can the entire team use the same project setup?","text":"The reproducibility guide pins dependency versions and records the interpreter release. A lockfile and a documented environment installation command keep collaborators' installations consistent."},
+    {"query":"Which document covers who owns what we build together?","text":"The collaboration agreement specifies intellectual property ownership. Each party retains prior inventions while rights to jointly developed deliverables follow the negotiated assignment terms."},
+    {"query":"Where are the arrangements for getting to the conference?","text":"The travel itinerary lists outbound flights, airport transfers, hotel check-in dates, and the venue address. Booking references and the return journey appear on the final page."},
+    {"query":"How do we bring back the database after the server fails?","text":"The disaster recovery procedure restores the latest verified database backup and replays transaction logs. Operators validate record counts and application health before resuming traffic."},
+    {"query":"Why is typing in the search box so slow?","text":"The performance profile shows document extraction blocking the search executor. Moving parsing and filesystem operations to background workers reduces interactive query latency."},
+    {"query":"Where can I find the answers people gave to our questionnaire?","text":"The survey response spreadsheet contains one row per participant and one column per question. The coding guide explains missing values and the scale used for each answer."},
+    {"query":"How do we prevent an employee who has left from accessing company systems?","text":"The offboarding checklist revokes account sessions, disables identity-provider access, removes group memberships, and rotates any shared credentials associated with the departing employee."},
+    {"query":"Which notes describe reducing the amount of personal information we retain?","text":"The data minimization plan inventories collected fields, removes unnecessary identifiers, and sets retention periods. Expired records are deleted according to the documented disposal schedule."}
+  ],
+  "distractors": [
+    "The annual picnic will take place on Friday. Attendees should bring reusable cups and indicate dietary preferences.",
+    "The design system defines typography, spacing, and accessible contrast ratios for every screen.",
+    "The camera records video at sixty frames per second. Its battery is charged through a USB cable.",
+    "A software license permits redistribution subject to attribution and preservation of the copyright notice.",
+    "A launch announcement introduces the new product and links to the download page.",
+    "The office printer requires a replacement toner cartridge. Supplies are kept beside the reception desk.",
+    "Network throughput was measured with a large sequential transfer between two machines.",
+    "The board reviewed the forecast and approved the fundraising presentation for next month.",
+    "The statistical software exports charts in SVG and PNG formats with configurable resolution.",
+    "The keyboard shortcut reference lists commands for switching windows and moving the insertion point.",
+    "The application icon uses a green magnifying glass on a neutral background.",
+    "The local weather forecast predicts clouds during the morning and rain after sunset.",
+    "The filesystem stores the filename, byte length, modification timestamp and ownership metadata.",
+    "The employee handbook describes annual leave allowances, expense submission deadlines and office hours.",
+    "The conference program includes keynote talks, parallel research sessions, and a poster reception.",
+    "The database schema defines foreign keys between customers, orders, and line items."
+  ]
+}

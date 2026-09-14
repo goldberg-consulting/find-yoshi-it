@@ -1,0 +1,22 @@
+# Local build products, runtime data, and private development artifacts
+.build/
+build/
+.swiftpm/
+.DS_Store
+.env
+.env.*
+*.sqlite*
+*.db
+*.db-*
+*.log
+*.app/
+*.dmg
+*.zip
+*.key
+*.pem
+*.p12
+*.mobileprovision
+# Original development notes contain private machine/network observations.
+/Find-Anything-PRD.md
+.agents/
+.codex/
