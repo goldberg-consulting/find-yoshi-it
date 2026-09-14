@@ -8,6 +8,11 @@ extension SearchEngine {
     private var joins: String { "files f JOIN sources s ON s.id=f.source_id" }
 
     public func search(_ request: SearchRequest) throws -> [SearchResult] {
+        try Task.checkCancellation()
+        return try database.withQueryBudget(seconds: request.namesOnly ? 2 : 15) { try retrieve(request) }
+    }
+
+    private func retrieve(_ request: SearchRequest) throws -> [SearchResult] {
         let query = String(request.query.trimmingCharacters(in:.whitespacesAndNewlines).prefix(512))
         let limit = max(1,min(100,request.limit))
         // Apply category precedence before channel candidate limits, so dependency/code hits cannot crowd out documents.
@@ -15,12 +20,12 @@ extension SearchEngine {
             var documents = request
             documents.category = .documents
             documents.limit = limit
-            let first = try search(documents)
+            let first = try retrieve(documents)
             guard first.count < limit else { return first }
             var other = request
             other.category = .other
             other.limit = limit - first.count
-            return first + (try search(other))
+            return first + (try retrieve(other))
         }
         let (filters,args) = filter(request)
         if query.isEmpty {
@@ -55,32 +60,52 @@ extension SearchEngine {
             let expression = lexicalExpression(query,phrase:request.mode == .exact)
             if !expression.isEmpty {
                 let explicitPath = query.contains("/") || SearchPresentation.dependencyDirectories.contains { SearchPresentation.explicitlyRequests($0, query: query) }
-                let nameExpression = request.mode == .names && !explicitPath ? "name : (" + expression + ")" : expression
+                let nameTerms = lexicalExpression(query, phrase: request.mode == .exact, prefix: request.mode != .exact)
+                let nameExpression = !explicitPath ? "name : (" + nameTerms + ")" : nameTerms
                 let names = try database.rows("SELECT \(resultColumns) FROM file_fts JOIN files f ON f.id=file_fts.rowid JOIN sources s ON s.id=f.source_id WHERE file_fts MATCH ? AND \(filters) ORDER BY bm25(file_fts) LIMIT 180",[.text(nameExpression)]+args)
                 for (rank,row) in names.enumerated() {
-                    if let value = try makeResult(row,includePreview:true) { merge(value,score:3.0/Double(60+rank),kind:"Filename match") }
+                    if let value = try makeResult(row,includePreview:!request.namesOnly) { merge(value,score:3.0/Double(60+rank),kind:"Filename match") }
                 }
                 // Literal substring paths and identifiers retain their punctuation, independent of FTS tokenization.
                 let literal = unquoted(query).lowercased()
-                let pathCondition = request.mode == .names && !explicitPath ? "0" : "instr(lower(f.relative_path),?)>0"
-                let literalArguments: [SQLValue] = [.text(literal)] + (request.mode == .names && !explicitPath ? [] : [.text(literal)]) + [.text(literal)]
-                let exactNames = try database.rows("SELECT \(resultColumns) FROM \(joins) WHERE \(filters) AND (instr(lower(f.name),?)>0 OR \(pathCondition)) ORDER BY CASE WHEN lower(f.name)=? THEN 0 ELSE 1 END,f.mtime DESC LIMIT 100",args+literalArguments)
-                for (rank,row) in exactNames.enumerated() {
-                    if let value = try makeResult(row,includePreview:true) { merge(value,score:0.08+1.0/Double(60+rank),kind:"Filename match") }
+                let pathCondition = !explicitPath ? "0" : "instr(lower(f.relative_path),?)>0"
+                let literalArguments: [SQLValue] = [.text(literal)] + (!explicitPath ? [] : [.text(literal)]) + [.text(literal)]
+                let exactNames: [SQLRow]
+                if !explicitPath {
+                    if literal.count >= 3 {
+                        let grams = "\"" + literal.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+                        exactNames = try database.rows("SELECT \(resultColumns) FROM file_name_grams JOIN files f ON f.id=file_name_grams.rowid JOIN sources s ON s.id=f.source_id WHERE file_name_grams MATCH ? AND \(filters) ORDER BY CASE WHEN lower(f.name)=? THEN 0 ELSE 1 END,f.mtime DESC LIMIT 100", [.text(grams)] + args + [.text(literal)])
+                    } else {
+                        exactNames = try database.rows("SELECT \(resultColumns) FROM \(joins) WHERE lower(f.name)>=? AND lower(f.name)<? AND \(filters) ORDER BY lower(f.name) LIMIT 100", [.text(literal), .text(literal + "􏿿")] + args)
+                    }
+                } else {
+                    exactNames = try database.rows("SELECT \(resultColumns) FROM \(joins) WHERE \(filters) AND (instr(lower(f.name),?)>0 OR \(pathCondition)) ORDER BY CASE WHEN lower(f.name)=? THEN 0 ELSE 1 END,f.mtime DESC LIMIT 100",args+literalArguments)
                 }
+                for (rank,row) in exactNames.enumerated() {
+                    if let value = try makeResult(row,includePreview:!request.namesOnly) { merge(value,score:0.08+1.0/Double(60+rank),kind:"Filename match") }
+                }
+                if !request.namesOnly {
                 let (contentFilters, contentArgs) = filter(contentRequest)
                 let passages = try database.rows("""
+                    WITH matched AS MATERIALIZED (
+                        SELECT p.*,bm25(passage_fts) AS relevance
+                        FROM passage_fts JOIN passages p ON p.id=passage_fts.rowid
+                        WHERE passage_fts MATCH ? AND EXISTS(SELECT 1 FROM \(joins) WHERE f.content_id=p.content_id AND \(contentFilters) AND (s.availability<>'offline' OR s.offline_content=1))
+                    ), representatives AS (
+                        SELECT *,ROW_NUMBER() OVER(PARTITION BY content_id ORDER BY relevance,id) AS passage_rank FROM matched
+                    )
                     SELECT \(resultColumns),p.id AS p_id,p.text AS p_text,p.location AS p_location,p.page AS p_page,p.line AS p_line,p.sheet AS p_sheet,p.cell AS p_cell
-                    FROM passage_fts JOIN passages p ON p.id=passage_fts.rowid JOIN files f ON f.content_id=p.content_id JOIN sources s ON s.id=f.source_id
-                    WHERE passage_fts MATCH ? AND \(contentFilters) AND (s.availability<>'offline' OR s.offline_content=1)
-                    ORDER BY bm25(passage_fts) LIMIT 360
-                    """,[.text(expression)]+contentArgs)
+                    FROM representatives p JOIN files f ON f.content_id=p.content_id JOIN sources s ON s.id=f.source_id
+                    WHERE p.passage_rank=1 AND \(contentFilters) AND (s.availability<>'offline' OR s.offline_content=1)
+                    ORDER BY p.relevance,f.id LIMIT 360
+                    """,[.text(expression)]+contentArgs+contentArgs)
                 for (rank,row) in passages.enumerated() {
                     if let value = try makeResult(row,includePreview:false) { merge(value,score:1.8/Double(60+rank),kind:"Text match") }
                 }
+                }
             }
         }
-        if request.mode != .exact && request.mode != .names, let vector = encoder.encode(query) {
+        if !request.namesOnly && request.mode != .exact && request.mode != .names, let vector = encoder.encode(query) {
             for (rank,entry) in try semanticCandidates(vector,request:contentRequest).enumerated() {
                 var value = entry.0
                 value.score = entry.1
@@ -105,6 +130,10 @@ extension SearchEngine {
     }
 
     public func related(fileID: Int64) throws -> [SearchResult] {
+        try database.withQueryBudget(seconds: 5) { try retrieveRelated(fileID: fileID) }
+    }
+
+    private func retrieveRelated(fileID: Int64) throws -> [SearchResult] {
         guard encoder.isAvailable,
               let row = try database.rows("SELECT \(resultColumns) FROM \(joins) WHERE f.id=? AND f.status<>'denied'",[.integer(fileID)]).first,
               let value = try makeResult(row,includePreview:false), value.availability != .offline || value.offlineContentAllowed,
@@ -118,28 +147,13 @@ extension SearchEngine {
     }
 
     private func semanticCandidates(_ vector: [Float], request: SearchRequest) throws -> [(SearchResult,Double)] {
-        let buckets = SemanticEncoder.queryBuckets(for:vector)
-        guard !buckets.isEmpty else { return [] }
-        let placeholders = Array(repeating:"?",count:buckets.count).joined(separator:",")
         let (filters,args) = filter(request)
-        // Resolve filters and access scope before candidate limiting, then decode only bounded candidates.
-        let exact = try database.rows("""
-            SELECT v.passage_id,v.vector FROM vectors v JOIN passages p ON p.id=v.passage_id
-            WHERE v.model=? AND EXISTS(SELECT 1 FROM \(joins) WHERE f.content_id=p.content_id AND \(filters) AND (s.availability<>'offline' OR s.offline_content=1))
-            LIMIT 20001
-            """, [.text(encoder.modelID)] + args)
-        // Small filtered libraries get exact recall. Use bounded ANN only beyond this threshold.
-        let candidates = exact.count <= 20000 ? exact : try database.rows("""
-            SELECT v.passage_id,v.vector,COUNT(*) AS hits FROM vector_buckets b JOIN vectors v ON v.passage_id=b.passage_id
-            JOIN passages p ON p.id=v.passage_id WHERE b.bucket IN (\(placeholders)) AND v.model=?
-            AND EXISTS(SELECT 1 FROM \(joins) WHERE f.content_id=p.content_id AND \(filters) AND (s.availability<>'offline' OR s.offline_content=1))
-            GROUP BY v.passage_id ORDER BY hits DESC,v.passage_id LIMIT 1200
-            """,buckets.map(SQLValue.integer)+[.text(encoder.modelID)]+args)
-        let ranked = candidates.compactMap { row -> (Int64,Double)? in
-            guard let data = row.data("vector") else { return nil }
-            let cosine = SemanticEncoder.cosine(vector,SemanticEncoder.unpack(data))
-            return cosine >= 0.30 ? (row.int("passage_id"),cosine):nil
-        }.sorted { $0.1 > $1.1 }.prefix(100)
+        let ranked = try database.exactVectorCandidates("""
+            SELECT v.passage_id,p.content_id,v.vector
+            FROM (SELECT DISTINCT f.content_id FROM \(joins) WHERE f.content_id IS NOT NULL AND \(filters) AND (s.availability<>'offline' OR s.offline_content=1)) eligible
+            JOIN passages p ON p.content_id=eligible.content_id
+            JOIN vectors v ON v.passage_id=p.id WHERE v.model=?
+            """, args + [.text(encoder.modelID)], query: vector, limit: 180)
         var output: [(SearchResult,Double)] = []
         for (id,cosine) in ranked {
             let rows = try database.rows("""
@@ -184,7 +198,7 @@ extension SearchEngine {
         return (clauses.joined(separator:" AND "),arguments)
     }
 
-    func lexicalExpression(_ value: String, phrase: Bool) -> String {
+    func lexicalExpression(_ value: String, phrase: Bool, prefix: Bool = false) -> String {
         let phrase = phrase || (value.count >= 2 && value.first == "\"" && value.last == "\"")
         let value = unquoted(value)
         guard value.contains(where:{$0.isLetter || $0.isNumber}) else { return "" }
@@ -195,7 +209,7 @@ extension SearchEngine {
         return regex.matches(in:value,range:NSRange(location:0,length:ns.length)).prefix(24).compactMap { match -> String? in
             let token = ns.substring(with:match.range(at:match.range(at:1).location == NSNotFound ? 2:1))
             guard token.contains(where:{$0.isLetter || $0.isNumber}) else { return nil }
-            return "\""+token.replacingOccurrences(of:"\"",with:"\"\"")+"\""
+            return "\""+token.replacingOccurrences(of:"\"",with:"\"\"")+"\"" + (prefix ? "*" : "")
         }.joined(separator:" OR ")
     }
 
@@ -206,15 +220,19 @@ extension SearchEngine {
 
     private func makeResult(_ row: SQLRow, includePreview: Bool) throws -> SearchResult? {
         let fileID = row.int("id")
+        if let revokedAt = revokedFiles[fileID] {
+            guard let indexedAt = row.date("indexed_at"), indexedAt > revokedAt else { return nil }
+            revokedFiles.removeValue(forKey: fileID)
+        }
         let path = URL(fileURLWithPath:row.string("source_path"),isDirectory:true).appendingPathComponent(row.string("relative_path")).path
         var availability = SourceAvailability(rawValue:row.string("availability")) ?? .offline
         var stale = row.date("indexed_mtime").map { abs($0.timeIntervalSince1970-row.double("mtime")) > 0.000001 } ?? false
         if availability != .offline {
             if URL(fileURLWithPath:path).resolvingSymlinksInPath().path != URL(fileURLWithPath:path).standardizedFileURL.path {
-                try revokeFile(fileID); return nil
+                if !database.readOnly { try revokeFile(fileID) } else { revokedFiles[fileID] = Date(); onAccessRevoked?(fileID) }; return nil
             }
             if access(path,R_OK) != 0 {
-                if errno == EACCES || errno == EPERM { try revokeFile(fileID); return nil }
+                if errno == EACCES || errno == EPERM { if !database.readOnly { try revokeFile(fileID) } else { revokedFiles[fileID] = Date(); onAccessRevoked?(fileID) }; return nil }
                 stale = true
                 availability = .offline
             }

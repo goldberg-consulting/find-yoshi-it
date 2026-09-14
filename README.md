@@ -29,10 +29,10 @@ Local changes use persistent filesystem-event checkpoints and a durable reconcil
 
 ## Search and extraction
 
-- Filename and full-text retrieval use SQLite FTS5.
+- Filename and full-text retrieval use SQLite FTS5, including an indexed filename substring lookup.
 - **Names** puts filename matches first, followed by matching contents; macOS metadata supplements local filenames during indexing.
 - **Exact**, **Hybrid**, and **Semantic** offer phrase, combined lexical/semantic, and meaning-based retrieval.
-- Apple NaturalLanguage provides on-device English sentence embeddings. Small eligible collections use exact vector scoring; larger collections use bounded approximate lookup and cosine reranking.
+- Apple NaturalLanguage provides on-device English sentence embeddings. Eligible passages use an exact, streaming scan of compact int8 vectors, with a native vectorized scorer. Repeated passages are reduced to the strongest passage per content before ranking. Legacy bucket data is retained for compatibility but is not used for queries.
 - Text, Markdown, source code, HTML, RTF, PDF, DOCX, XLSX, PPTX, CSV/TSV, and common images are supported. Vision provides local OCR.
 - Results retain locations such as PDF pages, Markdown lines, slide numbers, and spreadsheet cells. Unsupported formats remain discoverable by filename.
 
@@ -62,7 +62,7 @@ Development options include `--data-dir /absolute/path`, `--index-folder /absolu
 
 ## Limits and validation
 
-This is an early implementation. Million-file performance and retrieval quality on representative user corpora are not validated. Slow or disconnected shares can delay filesystem work. Semantic search currently supports English and approximate retrieval can miss results.
+This is an early implementation. Million-file performance and retrieval quality on representative user corpora are not validated. Slow or disconnected shares can delay filesystem work. Semantic search currently supports English; embedding relevance remains experimental and must be evaluated against representative queries.
 
 Extraction has per-file size, passage, page, and OCR limits. Partial coverage is reported. Office embedded objects, iWork, archives, mail connectors, and audio/video transcription are not implemented. Offline excerpts reflect the last confirmed access state; reconnecting permits fresh permission checks.
 
@@ -71,3 +71,29 @@ Tests exercise indexing persistence, filesystem replay, extraction, access rules
 The optional retrieval benchmark uses `Tests/Fixtures/retrieval-benchmark.json`, `scripts/benchmark-apple.swift`, and `scripts/benchmark-retrieval.py`. It requires Python with `numpy` and `fastembed`; the app itself does not. The fixture is a small hand-authored sanity check, not a benchmark of private documents. Do not commit benchmark outputs from a real library.
 
 Implementation references: [Apple sentence embeddings](https://developer.apple.com/documentation/naturallanguage/nlembedding/sentenceembedding(for:)), [Apple text recognition](https://developer.apple.com/documentation/vision/vnrecognizetextrequest), and [SQLite FTS5](https://www.sqlite.org/fts5.html).
+
+## Search latency and accuracy tools
+
+Names, contents, and metadata run independently and publish results as each channel finishes.
+Dedicated read-only WAL connections keep name lookup, content search, and previews separate from
+indexing. Query cancellation interrupts SQLite work; selecting a streamed result retains its identity
+when metadata is replaced by an indexed result. App copies with the same bundle identifier are
+collapsed, preferring the running copy.
+
+Use a local SQLite backup for reproducible comparisons:
+
+```sh
+swift run -c release FindYoshiBenchmark /path/to/snapshot.sqlite --migrate --names-only
+swift run -c release FindYoshiBenchmark /path/to/snapshot.sqlite
+```
+
+`--migrate` updates the snapshot schema; omit it for a read-only measurement of an up-to-date index.
+The benchmark emits JSON lines for synthetic queries, with total time and per-stage durations.
+These are engine timings, not end-to-end keyboard-to-paint measurements. First-call and repeated
+warm timings should be reported separately. Store output under ignored `build/`.
+
+`scripts/benchmark-vector-recall.py` compares the native packed scorer with a dense reference and
+the legacy bucket lookup on a deterministic sample. Its output records numerical error and recall,
+with an explicit tolerance for tied vectors. This tests lookup accuracy, not whether a passage answers
+a user's question. The hand-authored embedding fixture is a separate relevance check; passing a
+small synthetic set does not establish accuracy on a personal library.

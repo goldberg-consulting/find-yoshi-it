@@ -38,7 +38,7 @@ enum QuickSearchItem: Identifiable {
     var id: String {
         switch self {
         case .application(let app): return "application:\(app.id)"
-        case .document(let document): return "document:\(document.id)"
+        case .document(let document): return "document:\(document.path)"
         }
     }
 }
@@ -133,11 +133,15 @@ final class QuickSearchModel: ObservableObject {
         let requestedQuery = query
         let requestedRevision = revision
         documentTask = Task { [weak self] in
-            do { try await Task.sleep(for: .milliseconds(220)) }
+            do { try await Task.sleep(for: .milliseconds(40)) }
             catch { return }
             guard let self else { return }
             do {
-                let results = try await self.library.quickSearchDocuments(requestedQuery, category: requestedCategory)
+                let results = try await self.library.quickSearchDocuments(requestedQuery, category: requestedCategory, onUpdate: { [weak self] partial in
+                    guard let self, !Task.isCancelled, self.isVisible, requestedRevision == self.revision else { return }
+                    self.documents = Array(partial.prefix(12))
+                    self.restoreSelection()
+                })
                 guard !Task.isCancelled, self.isVisible, requestedRevision == self.revision else { return }
                 self.documents = Array(results.prefix(12))
                 self.searchingDocuments = false

@@ -35,6 +35,7 @@ public actor ApplicationCatalog {
     private var resolvedApplications: [String: ApplicationRecord] = [:]
     private var attemptedNames: [String: ContinuousClock.Instant] = [:]
     private var applications: [ApplicationRecord] = []
+    private var preferredPaths = Set<String>()
     private var refreshTask: Task<Void, Never>?
     private var lastRefresh: ContinuousClock.Instant?
 
@@ -65,6 +66,7 @@ public actor ApplicationCatalog {
         let task = Task {
             let extraRoots = await additionalRoots()
             let discovered = await ApplicationDiscovery.discover(roots + extraRoots)
+            preferredPaths = Set(extraRoots.map(\.path))
             applications = discovered
             lastRefresh = .now
             refreshTask = nil
@@ -88,7 +90,14 @@ public actor ApplicationCatalog {
             }
         }
         let extras = resolvedApplications.values.filter { FileManager.default.fileExists(atPath: $0.path) && !applications.contains($0) }
-        return (applications + extras).compactMap { application -> (ApplicationRecord, Int)? in
+        var unique: [String: ApplicationRecord] = [:]
+        for application in applications + extras {
+            let key = application.bundleIdentifier ?? application.path
+            if let old = unique[key] {
+                if preferredPaths.contains(application.path) && !preferredPaths.contains(old.path) { unique[key] = application }
+            } else { unique[key] = application }
+        }
+        return unique.values.compactMap { application -> (ApplicationRecord, Int)? in
             let displayScore = ApplicationName.score(query, name: application.name)
             let filename = URL(fileURLWithPath: application.path).deletingPathExtension().lastPathComponent
             let filenameScore = ApplicationName.score(query, name: filename).map { $0 - 10 }

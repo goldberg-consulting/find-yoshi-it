@@ -53,6 +53,7 @@ public struct ExtractionResult: Sendable {
 }
 
 public struct SearchRequest: Sendable {
+    public var namesOnly = false
     public var query: String
     public var mode: SearchMode
     public var sourceID: String?

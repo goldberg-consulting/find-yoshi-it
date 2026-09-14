@@ -3,6 +3,18 @@ import XCTest
 @testable import FindAnythingCore
 
 final class ApplicationCatalogTests: XCTestCase {
+    func testDuplicateBundleIdentifiersPreferTheRunningCopy() async throws {
+        let root = try workspace()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try app(root, "Installed/Notes.app", displayName: "Notes", bundleID: "test.notes")
+        try app(root, "Running/Notes.app", displayName: "Notes", bundleID: "test.notes")
+        let running = root.appendingPathComponent("Running/Notes.app")
+        let catalog = ApplicationCatalog(roots: [root.appendingPathComponent("Installed")], additionalRoots: { [running] })
+        await catalog.refresh()
+        let results = await catalog.search("notes")
+        XCTAssertEqual(results.map(\.path), [running.path])
+    }
+
     func testRunningApplicationOutsideStandardRootsMatchesPrefixBeforeExactLookup() async throws {
         let root = try workspace()
         defer { try? FileManager.default.removeItem(at: root) }

@@ -42,6 +42,9 @@ final class AppModel: ObservableObject {
     var showShortcutSettings: (() -> Void)?
 
     private var engine: SearchEngine?
+    private var nameReader: SearchEngine?
+    private var contentReader: SearchEngine?
+    private var previewReader: SearchEngine?
     private var searchTask: Task<Void, Never>?
     private var applicationSearchTask: Task<Void, Never>?
     private var readerTask: Task<Void, Never>?
@@ -90,7 +93,15 @@ final class AppModel: ObservableObject {
             watcher = SourceWatcher(journal: journal, onChange: { [weak self] key in
                 self?.processChanges(key)
             }, onError: { [weak self] error in self?.errorMessage = error })
-            engine = try SearchEngine(databaseURL: directory.appendingPathComponent("Library.sqlite"))
+            let databaseURL = directory.appendingPathComponent("Library.sqlite")
+            let writer = try await Task.detached(priority: .utility) { try SearchEngine(databaseURL: databaseURL) }.value
+            engine = writer
+            let revoke: @Sendable (Int64) -> Void = { fileID in
+                Task { try? await writer.invalidateAccess(fileID: fileID) }
+            }
+            nameReader = try SearchEngine(databaseURL: databaseURL, readOnly: true, onAccessRevoked: revoke)
+            contentReader = try SearchEngine(databaseURL: databaseURL, readOnly: true, onAccessRevoked: revoke)
+            previewReader = try SearchEngine(databaseURL: databaseURL, readOnly: true, onAccessRevoked: revoke)
             if let position = arguments.firstIndex(of: "--search"), arguments.indices.contains(position + 1) {
                 query = arguments[position + 1]
             }
@@ -405,7 +416,7 @@ final class AppModel: ObservableObject {
         searchTask = Task { [weak self] in
             guard let self, self.engine != nil else { return }
             if !immediate {
-                do { try await Task.sleep(for: .milliseconds(220)) } catch { return }
+                do { try await Task.sleep(for: .milliseconds(40)) } catch { return }
             }
             guard !Task.isCancelled else { return }
             self.isSearching = true
@@ -418,7 +429,11 @@ final class AppModel: ObservableObject {
             }
             do {
                 let request = SearchRequest(query: self.query, mode: self.mode, sourceID: self.sourceID, fileExtension: self.fileType.isEmpty ? nil : self.fileType, modifiedAfter: after)
-                let found = self.fileType == "app" ? [] : try await self.searchFiles(request)
+                let found = self.fileType == "app" ? [] : try await self.searchFiles(request, onUpdate: { [weak self] partial in
+                    guard let self, !Task.isCancelled, revision == self.searchRevision else { return }
+                    self.results = partial
+                    if !partial.contains(where: { $0.id == self.selectedID }) { self.selectedID = partial.first?.id }
+                })
                 guard !Task.isCancelled, revision == self.searchRevision else { return }
                 let previousSelection = self.selectedID
                 let ranked = (try? await self.searchHistory?.rank(found, query: request.query)) ?? found
@@ -456,29 +471,24 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func quickSearchDocuments(_ query: String, category: FileSearchCategory = .all) async throws -> [SearchResult] {
+    func quickSearchDocuments(_ query: String, category: FileSearchCategory = .all, onUpdate: (([SearchResult]) -> Void)? = nil) async throws -> [SearchResult] {
         guard engine != nil, !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
         try Task.checkCancellation()
-        let found = try await searchFiles(SearchRequest(query: query, mode: .names, limit: 60, category: category))
+        let found = try await searchFiles(SearchRequest(query: query, mode: .names, limit: 60, category: category), onUpdate: onUpdate)
         let ranked = (try? await searchHistory?.rank(found, query: query)) ?? found
         try Task.checkCancellation()
         return Array(ranked.prefix(12))
     }
 
-    private func searchFiles(_ request: SearchRequest) async throws -> [SearchResult] {
-        guard let engine else { return [] }
-        async let metadata = MetadataFileSearch.search(request, sources: sources)
-        let indexed = try await engine.search(request)
-        let supplemental = await metadata
-        let indexedPaths = Set(indexed.map(\.path))
-        let combined = indexed + supplemental.filter { !indexedPaths.contains($0.path) }
-        return Array(combined.sorted {
-            let a = SearchPresentation.isDocument(extension: $0.fileExtension), b = SearchPresentation.isDocument(extension: $1.fileExtension)
-            if a != b { return a }
-            if $0.nameMatched != $1.nameMatched { return $0.nameMatched }
-            if $0.score != $1.score { return $0.score > $1.score }
-            return $0.path < $1.path
-        }.prefix(request.limit))
+    private func searchFiles(_ request: SearchRequest, onUpdate: (([SearchResult]) -> Void)? = nil) async throws -> [SearchResult] {
+        guard let nameReader, let contentReader else { return [] }
+        let sources = sources
+        let pipeline = FileSearchPipeline(
+            names: { try await nameReader.search($0) },
+            content: { try await contentReader.search($0) },
+            metadata: { await MetadataFileSearch.search($0, sources: sources) }
+        )
+        return try await pipeline.search(request, onUpdate: onUpdate)
     }
 
     func findApplications(_ query: String, limit: Int = 6) async -> [ApplicationRecord] {
@@ -514,12 +524,13 @@ final class AppModel: ObservableObject {
             self.passages = result?.passages ?? []
             self.relatedResults = []
             self.selectedPassageID = result?.passages.first?.id
-            guard let result, let engine = self.engine else { return }
+            guard let result, let engine = self.previewReader else { return }
             do {
                 let loaded = try await engine.preview(fileID: result.fileID, matchingPassageID: result.passages.first?.id)
-                let related = try await engine.related(fileID: result.fileID)
                 guard !Task.isCancelled, self.selectedResult == result else { return }
                 self.passages = loaded
+                let related = try await engine.related(fileID: result.fileID)
+                guard !Task.isCancelled, self.selectedResult == result else { return }
                 self.relatedResults = related
                 if self.selectedPassageID == nil { self.selectedPassageID = loaded.first?.id }
             } catch {

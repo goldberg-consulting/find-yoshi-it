@@ -6,10 +6,17 @@ public actor SearchEngine {
     let encoder = SemanticEncoder()
     var activeScans = Set<String>()
     let databaseURL: URL
+    let onAccessRevoked: (@Sendable (Int64) -> Void)?
+    var revokedFiles: [Int64: Date] = [:]
 
-    public init(databaseURL: URL) throws {
+    public init(databaseURL: URL, readOnly: Bool = false, onAccessRevoked: (@Sendable (Int64) -> Void)? = nil) throws {
+        self.onAccessRevoked = onAccessRevoked
         self.databaseURL = databaseURL
-        self.database = try Database(url:databaseURL)
+        self.database = try Database(url:databaseURL, readOnly: readOnly)
+    }
+
+    public func invalidateAccess(fileID: Int64) throws {
+        try revokeFile(fileID)
     }
 
     public func sources() throws -> [SourceRecord] {

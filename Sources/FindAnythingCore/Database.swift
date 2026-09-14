@@ -1,5 +1,6 @@
 import Foundation
 import CSQLite
+import VectorMath
 
 enum SQLValue {
     case text(String), integer(Int64), real(Double), blob(Data), null
@@ -14,11 +15,23 @@ struct DatabaseError: LocalizedError {
 /// Confined to SearchEngine's actor. Prepared statements never escape a synchronous call.
 final class Database {
     let url: URL
+    let readOnly: Bool
+    private var budgetActive = false
+    var profiling = false
+    var queryTimings: [QueryTiming] = []
     private var handle: OpaquePointer?
     private let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
-    init(url: URL) throws {
+    init(url: URL, readOnly: Bool = false) throws {
         self.url = url
+        self.readOnly = readOnly
+        if readOnly {
+            let result = sqlite3_open_v2(url.path, &handle, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil)
+            guard result == SQLITE_OK else { throw error() }
+            sqlite3_busy_timeout(handle, 250)
+            try executeScript("PRAGMA query_only=ON; PRAGMA cache_size=-8192;")
+            return
+        }
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let result = sqlite3_open_v2(url.path, &handle, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nil)
         guard result == SQLITE_OK else { throw error() }
@@ -124,6 +137,26 @@ final class Database {
                 try execute("INSERT INTO settings(key,value) VALUES('dependency-search-defaults-v1','1')")
             }
         }
+        try executeScript("""
+            CREATE INDEX IF NOT EXISTS files_name_lower ON files(lower(name));
+            CREATE VIRTUAL TABLE IF NOT EXISTS file_name_grams USING fts5(name,content='files',content_rowid='id',tokenize='trigram');
+            CREATE TRIGGER IF NOT EXISTS files_grams_insert AFTER INSERT ON files BEGIN
+                INSERT INTO file_name_grams(rowid,name) VALUES(new.id,new.name);
+            END;
+            CREATE TRIGGER IF NOT EXISTS files_grams_delete AFTER DELETE ON files BEGIN
+                INSERT INTO file_name_grams(file_name_grams,rowid,name) VALUES('delete',old.id,old.name);
+            END;
+            CREATE TRIGGER IF NOT EXISTS files_grams_update AFTER UPDATE OF name ON files BEGIN
+                INSERT INTO file_name_grams(file_name_grams,rowid,name) VALUES('delete',old.id,old.name);
+                INSERT INTO file_name_grams(rowid,name) VALUES(new.id,new.name);
+            END;
+            """)
+        if try rows("SELECT key FROM settings WHERE key='filename-grams-v1'").isEmpty {
+            try transaction {
+                try execute("INSERT INTO file_name_grams(file_name_grams) VALUES('rebuild')")
+                try execute("INSERT INTO settings(key,value) VALUES('filename-grams-v1','1')")
+            }
+        }
         try enableFTSSecureDeletion()
     }
 
@@ -139,6 +172,7 @@ final class Database {
         try transaction {
             try execute("INSERT INTO passage_fts(passage_fts) VALUES('optimize')")
             try execute("INSERT INTO file_fts(file_fts) VALUES('optimize')")
+            try execute("INSERT INTO file_name_grams(file_name_grams) VALUES('optimize')")
         }
         let checkpoint = try rows("PRAGMA wal_checkpoint(TRUNCATE)").first
         guard checkpoint?.int("busy") == 0 else {
@@ -149,7 +183,8 @@ final class Database {
     private func enableFTSSecureDeletion() throws {
         for sql in [
             "INSERT INTO passage_fts(passage_fts,rank) VALUES('secure-delete',1)",
-            "INSERT INTO file_fts(file_fts,rank) VALUES('secure-delete',1)"
+            "INSERT INTO file_fts(file_fts,rank) VALUES('secure-delete',1)",
+            "INSERT INTO file_name_grams(file_name_grams,rank) VALUES('secure-delete',1)"
         ] {
             let statement = try prepare(sql, [])
             let code = sqlite3_step(statement)
@@ -171,9 +206,16 @@ final class Database {
     }
 
     func rows(_ sql: String, _ arguments: [SQLValue] = []) throws -> [SQLRow] {
+        let started = Date()
+        var result: [SQLRow] = []
+        defer {
+            if profiling {
+                let stage = sql.contains("vector_buckets") ? "vector buckets" : sql.contains("FROM vectors") ? "vector eligibility" : sql.contains("passage_fts") ? "content FTS" : sql.contains("file_name_grams") ? "filename trigram" : sql.contains("file_fts") ? "filename FTS" : sql.contains("instr(lower(f.name)") ? "filename substring" : "result hydration"
+                queryTimings.append(QueryTiming(stage: stage, milliseconds: Date().timeIntervalSince(started) * 1000, rows: result.count))
+            }
+        }
         let statement = try prepare(sql, arguments)
         defer { sqlite3_finalize(statement) }
-        var result: [SQLRow] = []
         while true {
             let code = sqlite3_step(statement)
             if code == SQLITE_DONE { return result }
@@ -194,6 +236,47 @@ final class Database {
             }
             result.append(SQLRow(values:row))
         }
+    }
+
+    /// Stream packed vectors directly from SQLite. Keep one strongest passage per content,
+    /// so long spreadsheets and duplicate locations cannot consume the candidate budget.
+    func exactVectorCandidates(_ sql: String, _ arguments: [SQLValue], query: [Float], limit: Int) throws -> [(Int64, Double)] {
+        let start = Date()
+        let statement = try prepare(sql, arguments)
+        defer { sqlite3_finalize(statement) }
+        var best: [Int64: (Int64, Double)] = [:]
+        var count = 0
+        let queryNorm = sqrt(query.reduce(0.0) { $0 + Double($1) * Double($1) })
+        try query.withUnsafeBufferPointer { buffer in
+            while true {
+                let code = sqlite3_step(statement)
+                if code == SQLITE_DONE { break }
+                guard code == SQLITE_ROW else { throw error() }
+                count += 1
+                guard let blob = sqlite3_column_blob(statement, 2) else { continue }
+                let score = fy_packed_cosine_with_norm(blob.assumingMemoryBound(to: UInt8.self), Int(sqlite3_column_bytes(statement, 2)), buffer.baseAddress, buffer.count, queryNorm)
+                guard score >= 0.30 else { continue }
+                let content = sqlite3_column_int64(statement, 1)
+                if score > (best[content]?.1 ?? -1) { best[content] = (sqlite3_column_int64(statement, 0), score) }
+            }
+        }
+        if profiling { queryTimings.append(QueryTiming(stage: "exact packed vectors", milliseconds: Date().timeIntervalSince(start)*1000, rows: count)) }
+        return Array(best.values.sorted { $0.1 == $1.1 ? $0.0 < $1.0 : $0.1 > $1.1 }.prefix(limit))
+    }
+
+    func withQueryBudget<T>(seconds: Double, _ operation: () throws -> T) throws -> T {
+        if budgetActive { return try operation() }
+        budgetActive = true
+        defer { budgetActive = false }
+        let budget = QueryBudget(deadline: Date().addingTimeInterval(seconds))
+        let context = Unmanaged.passUnretained(budget).toOpaque()
+        sqlite3_progress_handler(handle, 1000, { context in
+            guard let context else { return 0 }
+            let budget = Unmanaged<QueryBudget>.fromOpaque(context).takeUnretainedValue()
+            return Task.isCancelled || Date() >= budget.deadline ? 1 : 0
+        }, context)
+        defer { sqlite3_progress_handler(handle, 0, nil, nil) }
+        return try withExtendedLifetime(budget) { try operation() }
     }
 
     var lastID: Int64 { sqlite3_last_insert_rowid(handle) }
@@ -234,4 +317,9 @@ struct SQLRow {
     func date(_ key: String) -> Date? { switch values[key] { case .real(let v): return Date(timeIntervalSince1970:v); case .integer(let v): return Date(timeIntervalSince1970:Double(v)); default: return nil } }
     func data(_ key: String) -> Data? { if case .blob(let v) = values[key] { return v }; return nil }
     func optionalInt(_ key: String) -> Int? { if case .integer(let v) = values[key] { return Int(v) }; return nil }
+}
+
+private final class QueryBudget {
+    let deadline: Date
+    init(deadline: Date) { self.deadline = deadline }
 }
