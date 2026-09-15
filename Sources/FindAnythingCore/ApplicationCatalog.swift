@@ -188,8 +188,10 @@ private enum ApplicationDiscovery {
             info = dictionary
         }
         let bundleIdentifier = usableName(info["CFBundleIdentifier"])
+        // Some user-facing .app bundles (including Passwords) use XPC!.
+        // Discovery already treats app bundles as leaves and skips .xpc helpers.
         if let type = info["CFBundlePackageType"] as? String,
-           type != "APPL", !(type == "FNDR" && bundleIdentifier == "com.apple.finder") { return nil }
+           !["APPL", "XPC!"].contains(type), !(type == "FNDR" && bundleIdentifier == "com.apple.finder") { return nil }
         if let background = info["LSBackgroundOnly"] as? NSNumber, background.boolValue { return nil }
         if let background = info["LSBackgroundOnly"] as? String, ["1", "true", "yes"].contains(background.lowercased()) { return nil }
         let name = usableName(info["CFBundleDisplayName"]) ?? usableName(info["CFBundleName"]) ?? visibleURL.deletingPathExtension().lastPathComponent

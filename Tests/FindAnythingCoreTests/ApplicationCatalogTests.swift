@@ -3,6 +3,23 @@ import XCTest
 @testable import FindAnythingCore
 
 final class ApplicationCatalogTests: XCTestCase {
+    func testXPCApplicationIsDiscoverableButBackgroundAndNestedHelpersStayHidden() async throws {
+        let root = try workspace()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try app(root, "Passwords.app", displayName: "Passwords", bundleID: "com.apple.Passwords", extra: ["CFBundlePackageType": "XPC!"])
+        try app(root, "Passwords.app/Contents/XPCServices/Passwords Helper.app", displayName: "Passwords Helper", extra: ["CFBundlePackageType": "XPC!"])
+        try app(root, "Background.app", displayName: "Passwords Background", extra: ["CFBundlePackageType": "XPC!", "LSBackgroundOnly": true])
+        let catalog = ApplicationCatalog(roots: [root])
+        await catalog.refresh()
+        for query in ["passwords", "pass"] {
+            let results = await catalog.search(query)
+            XCTAssertEqual(results.map(\.name), ["Passwords"])
+        }
+        let registered = ApplicationCatalog(roots: [], registryLookup: { _ in root.appendingPathComponent("Passwords.app") })
+        let exact = await registered.search("passwords")
+        XCTAssertEqual(exact.first?.bundleIdentifier, "com.apple.Passwords")
+    }
+
     func testDuplicateBundleIdentifiersPreferTheRunningCopy() async throws {
         let root = try workspace()
         defer { try? FileManager.default.removeItem(at: root) }
