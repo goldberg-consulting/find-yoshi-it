@@ -24,7 +24,7 @@ extension SearchEngine {
             return SearchProfile(milliseconds: Date().timeIntervalSince(start)*1000, resultCount: result.count, timedOut: false, error: nil, stages: database.queryTimings)
         } catch {
             if Task.isCancelled { throw CancellationError() }
-            return SearchProfile(milliseconds: Date().timeIntervalSince(start)*1000, resultCount: 0, timedOut: (error as? DatabaseError)?.message.contains("interrupted") == true, error: error.localizedDescription, stages: database.queryTimings)
+            return SearchProfile(milliseconds: Date().timeIntervalSince(start)*1000, resultCount: 0, timedOut: (error as? SearchInterruption) == .timedOut, error: error.localizedDescription, stages: database.queryTimings)
         }
     }
 }

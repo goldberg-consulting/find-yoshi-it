@@ -7,7 +7,12 @@ enum SQLValue {
     static func date(_ value: Date?) -> SQLValue { value.map { .real($0.timeIntervalSince1970) } ?? .null }
 }
 
+public enum SearchInterruption: Error, Sendable {
+    case timedOut
+}
+
 struct DatabaseError: LocalizedError {
+    var code: Int32 = 0
     var message: String
     var errorDescription: String? { message }
 }
@@ -276,7 +281,13 @@ final class Database {
             return Task.isCancelled || Date() >= budget.deadline ? 1 : 0
         }, context)
         defer { sqlite3_progress_handler(handle, 0, nil, nil) }
-        return try withExtendedLifetime(budget) { try operation() }
+        try Task.checkCancellation()
+        do {
+            return try withExtendedLifetime(budget) { try operation() }
+        } catch let failure as DatabaseError where failure.code == SQLITE_INTERRUPT {
+            if Task.isCancelled { throw CancellationError() }
+            throw SearchInterruption.timedOut
+        }
     }
 
     var lastID: Int64 { sqlite3_last_insert_rowid(handle) }
@@ -305,7 +316,7 @@ final class Database {
         return statement
     }
 
-    private func error() -> DatabaseError { DatabaseError(message:handle.map { String(cString:sqlite3_errmsg($0)) } ?? "Could not open the local index.") }
+    private func error() -> DatabaseError { DatabaseError(code: handle.map { sqlite3_errcode($0) } ?? SQLITE_ERROR, message:handle.map { String(cString:sqlite3_errmsg($0)) } ?? "Could not open the local index.") }
 }
 
 struct SQLRow {

@@ -19,6 +19,7 @@ final class AppModel: ObservableObject {
     @Published var selectedPassageID: Int64?
     @Published var showHealth = false
     @Published var isSearching = false
+    @Published var searchStatus: String?
     @Published var progress: IndexProgress?
     @Published var queuedSources: [String] = []
     @Published var errorMessage: String?
@@ -409,6 +410,7 @@ final class AppModel: ObservableObject {
     }
 
     func scheduleSearch(immediate: Bool = false) {
+        searchStatus = nil
         scheduleApplicationSearch()
         searchTask?.cancel()
         searchRevision += 1
@@ -445,7 +447,10 @@ final class AppModel: ObservableObject {
             } catch {
                 guard !Task.isCancelled, revision == self.searchRevision else { return }
                 self.isSearching = false
-                self.errorMessage = error.localizedDescription
+                if error is CancellationError { return }
+                if error as? SearchInterruption == .timedOut {
+                    self.searchStatus = "Content search took too long. Results may be incomplete. Narrow your search or press Return to retry."
+                } else { self.errorMessage = error.localizedDescription }
             }
         }
     }
@@ -529,10 +534,12 @@ final class AppModel: ObservableObject {
                 let loaded = try await engine.preview(fileID: result.fileID, matchingPassageID: result.passages.first?.id)
                 guard !Task.isCancelled, self.selectedResult == result else { return }
                 self.passages = loaded
-                let related = try await engine.related(fileID: result.fileID)
+                if self.selectedPassageID == nil { self.selectedPassageID = loaded.first?.id }
+                let related: [SearchResult]
+                do { related = try await engine.related(fileID: result.fileID) }
+                catch SearchInterruption.timedOut { return } // Optional suggestions must not block the preview.
                 guard !Task.isCancelled, self.selectedResult == result else { return }
                 self.relatedResults = related
-                if self.selectedPassageID == nil { self.selectedPassageID = loaded.first?.id }
             } catch {
                 guard !Task.isCancelled, self.selectedResult == result else { return }
                 self.errorMessage = error.localizedDescription

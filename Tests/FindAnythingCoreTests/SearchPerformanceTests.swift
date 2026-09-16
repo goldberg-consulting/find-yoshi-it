@@ -3,6 +3,34 @@ import VectorMath
 @testable import FindAnythingCore
 
 final class SearchPerformanceTests: XCTestCase {
+    func testQueryTimeoutIsTypedAndConnectionRecovers() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let database = try Database(url: root.appendingPathComponent("index.sqlite"))
+        XCTAssertThrowsError(try database.withQueryBudget(seconds: -1) {
+            try database.rows("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000) SELECT sum(x) FROM n")
+        }) { XCTAssertEqual($0 as? SearchInterruption, .timedOut) }
+        let rows = try database.withQueryBudget(seconds: 1) { try database.rows("SELECT 42 AS value") }
+        XCTAssertEqual(rows.first?.int("value"), 42)
+        XCTAssertThrowsError(try database.withQueryBudget(seconds: 1) { try database.rows("SELECT * FROM nonexistent_table") }) {
+            XCTAssertTrue($0 is DatabaseError, "Real database failures must not become timeouts")
+        }
+    }
+
+    func testCanceledBudgetProducesCancellationAndClearsHandler() async throws {
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let database = try Database(url: root.appendingPathComponent("index.sqlite"))
+            XCTAssertThrowsError(try database.withQueryBudget(seconds: 10) { try database.rows("SELECT 1") }) {
+                XCTAssertTrue($0 is CancellationError)
+            }
+            XCTAssertEqual(try database.rows("SELECT 42 AS value").first?.int("value"), 42)
+        }
+        try await task.value
+    }
+
     func testPackedScoringAgreesWithReferenceAndRejectsMalformedVectors() {
         let query: [Float] = (0..<512).map { sin(Float($0)) }
         for offset in 0..<12 {

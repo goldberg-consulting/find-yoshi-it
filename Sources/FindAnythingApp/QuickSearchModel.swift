@@ -53,6 +53,7 @@ final class QuickSearchModel: ObservableObject {
     @Published private(set) var selectedID: String?
     @Published private(set) var searchingDocuments = false
     @Published private(set) var errorMessage: String?
+    @Published private(set) var searchStatus: String?
     @Published private(set) var launching = false
     @Published private(set) var focusRequest = UUID()
 
@@ -118,6 +119,7 @@ final class QuickSearchModel: ObservableObject {
     func setQuery(_ value: String) {
         revision += 1
         query = value
+        searchStatus = nil
         errorMessage = nil
         applications = []
         documents = []
@@ -149,7 +151,10 @@ final class QuickSearchModel: ObservableObject {
             } catch {
                 guard !Task.isCancelled, self.isVisible, requestedRevision == self.revision else { return }
                 self.searchingDocuments = false
-                self.errorMessage = "Documents could not be searched. \(error.localizedDescription)"
+                if error is CancellationError { return }
+                if error as? SearchInterruption == .timedOut {
+                    self.searchStatus = "Content search took too long. Results may be incomplete. Try a more specific name."
+                } else { self.errorMessage = "Documents could not be searched. \(error.localizedDescription)" }
             }
         }
     }

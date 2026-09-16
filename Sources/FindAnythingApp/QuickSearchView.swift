@@ -42,6 +42,10 @@ struct QuickSearchView: View {
             }.padding(.horizontal, 20).padding(.bottom, 12)
             Divider()
             resultArea.frame(maxWidth: .infinity, maxHeight: .infinity)
+            if let status = model.searchStatus {
+                Text(status).font(.system(size: 12)).foregroundStyle(.secondary)
+                    .padding(.horizontal, 20).padding(.vertical, 8)
+            }
             if let error = model.errorMessage {
                 Text(error).font(.system(size: 12)).foregroundStyle(.red)
                     .frame(maxWidth: .infinity, alignment: .leading)

@@ -10,18 +10,23 @@ struct FileSearchPipeline {
     let metadata: Lookup
 
     func search(_ request: SearchRequest, onUpdate: (([SearchResult]) -> Void)? = nil) async throws -> [SearchResult] {
-        return try await withThrowingTaskGroup(of: [SearchResult].self) { group in
+        return try await withThrowingTaskGroup(of: ([SearchResult], Bool).self) { group in
             if request.mode != .semantic {
                 var fast = request
                 fast.namesOnly = true
                 let fastRequest = fast
-                group.addTask { (try? await names(fastRequest)) ?? [] }
-                group.addTask { (try? await metadata(request)) ?? [] }
+                group.addTask { ((try? await names(fastRequest)) ?? [], false) }
+                group.addTask { ((try? await metadata(request)) ?? [], false) }
             }
-            group.addTask { try await content(request) }
+            group.addTask {
+                do { return (try await content(request), false) }
+                catch SearchInterruption.timedOut { return ([], true) }
+            }
+            var timedOut = false
             var combined: [String: SearchResult] = [:]
             var ranked: [SearchResult] = []
-            for try await batch in group {
+            for try await (batch, timeout) in group {
+                timedOut = timedOut || timeout
                 try Task.checkCancellation()
                 for item in batch {
                     if let existing = combined[item.path] {
@@ -41,6 +46,9 @@ struct FileSearchPipeline {
                 }.prefix(request.limit))
                 onUpdate?(ranked)
             }
+            // Drain independent channels before reporting incomplete content results.
+            // Their published results remain useful even when content exceeds its budget.
+            if timedOut { throw SearchInterruption.timedOut }
             return ranked
         }
     }

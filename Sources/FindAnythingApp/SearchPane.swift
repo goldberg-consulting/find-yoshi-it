@@ -45,6 +45,10 @@ struct SearchPane: View {
             .shadow(color: .black.opacity(0.025), radius: 5, y: 2)
             .padding(.horizontal, 28)
 
+            if let status = model.searchStatus {
+                Text(status).font(.caption).foregroundStyle(.secondary)
+                    .padding(.horizontal, 28).padding(.top, 8)
+            }
             VStack(alignment: .leading, spacing: 10) {
                 modePicker
                 filterPickers

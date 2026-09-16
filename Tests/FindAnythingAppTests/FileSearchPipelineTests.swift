@@ -4,6 +4,30 @@ import FindAnythingCore
 
 final class FileSearchPipelineTests: XCTestCase {
     @MainActor
+    func testContentTimeoutWaitsForNamesAndPreservesTheirResults() async throws {
+        let item = SearchResult(fileID: 1, sourceID: "s", sourceName: "s", filename: "report.md", path: "/report.md", fileExtension: "md", modifiedAt: Date())
+        var latest: [SearchResult] = []
+        let pipeline = FileSearchPipeline(names: { _ in
+            try await Task.sleep(for: .milliseconds(30))
+            return [item]
+        }, content: { _ in throw SearchInterruption.timedOut }, metadata: { _ in [] })
+        do {
+            _ = try await pipeline.search(SearchRequest(query: "report")) { latest = $0 }
+            XCTFail("Expected incomplete-search status")
+        } catch { XCTAssertEqual(error as? SearchInterruption, .timedOut) }
+        XCTAssertEqual(latest.map(\.fileID), [1])
+    }
+
+    @MainActor
+    func testActualContentFailureIsNotHidden() async throws {
+        let pipeline = FileSearchPipeline(names: { _ in [] }, content: { _ in throw NSError(domain: "database corruption", code: 1) }, metadata: { _ in [] })
+        do {
+            _ = try await pipeline.search(SearchRequest(query: "report"))
+            XCTFail("Expected failure")
+        } catch { XCTAssertEqual((error as NSError).domain, "database corruption") }
+    }
+
+    @MainActor
     func testFastLookupFailureDoesNotCancelAuthoritativeContentResults() async throws {
         let item = SearchResult(fileID: 1, sourceID: "s", sourceName: "s", filename: "report.md", path: "/report.md", fileExtension: "md", modifiedAt: Date())
         let failed: FileSearchPipeline.Lookup = { _ in throw NSError(domain: "Lookup timeout", code: 1) }
