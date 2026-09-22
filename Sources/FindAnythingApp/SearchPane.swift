@@ -80,8 +80,8 @@ struct SearchPane: View {
                                     SectionEyebrow(text: "Documents & other files").frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 8).padding(.top, 8)
                                 }
                             }
-                            ForEach(model.results) { result in
-                                ResultCard(result: result, selected: model.selectedID == result.id)
+                            ForEach(ResultGroup.make(model.results)) { group in
+                                ResultGroupCard(group: group)
                             }
                         }.padding(.horizontal, 20).padding(.bottom, 24)
                     }
@@ -164,6 +164,35 @@ private struct ApplicationResultCard: View {
                 Label("Open", systemImage: "arrow.up.right").font(.system(size: 11)).foregroundStyle(Palette.accent)
             }.padding(15).background(Palette.paper, in: RoundedRectangle(cornerRadius: 10)).contentShape(Rectangle())
         }.buttonStyle(.plain).accessibilityLabel("Open application \(application.name)")
+    }
+}
+
+private struct ResultGroupCard: View {
+    @EnvironmentObject private var model: AppModel
+    let group: ResultGroup
+    @State private var expanded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            let representative = group.first
+            ResultCard(result: representative, selected: representative.id == model.selectedID)
+            if group.results.count > 1 {
+                Button {
+                    expanded.toggle()
+                } label: {
+                    Label("\(group.results.count) locations / versions", systemImage: expanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.accent)
+                }
+                .buttonStyle(.plain).padding(.horizontal, 17)
+                .accessibilityLabel("\(expanded ? "Collapse" : "Expand") \(group.first.filename), \(group.results.count) locations or versions")
+                if expanded {
+                    ForEach(group.results.filter { $0.path != representative.path }, id: \.path) { result in
+                        ResultCard(result: result, selected: result.id == model.selectedID)
+                            .padding(.leading, 18)
+                    }
+                }
+            }
+        }
     }
 }
 

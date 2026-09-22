@@ -52,6 +52,7 @@ final class AppModel: ObservableObject {
     private var scanTask: Task<Void, Never>?
     private var reconciliationTask: Task<Void, Never>?
     private var searchRevision = 0
+    private var searchContext: [String]?
     private var didStart = false
     private var verificationSources = Set<String>()
     private var lastProgressRefresh = Date.distantPast
@@ -334,7 +335,7 @@ final class AppModel: ObservableObject {
         }
         if Date().timeIntervalSince(lastProgressSearch) >= 3 {
             lastProgressSearch = Date()
-            scheduleSearch(immediate: true)
+            scheduleSearch(immediate: true, background: true)
         }
     }
 
@@ -409,7 +410,11 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func scheduleSearch(immediate: Bool = false) {
+    func scheduleSearch(immediate: Bool = false, background: Bool = false) {
+        if background && isSearching { return }
+        let context = [query, mode.rawValue, sourceID ?? "", fileType, dateFilter]
+        let keepCurrentCards = searchContext == context && !results.isEmpty
+        searchContext = context
         searchStatus = nil
         scheduleApplicationSearch()
         searchTask?.cancel()
@@ -433,6 +438,8 @@ final class AppModel: ObservableObject {
                 let request = SearchRequest(query: self.query, mode: self.mode, sourceID: self.sourceID, fileExtension: self.fileType.isEmpty ? nil : self.fileType, modifiedAfter: after)
                 let found = self.fileType == "app" ? [] : try await self.searchFiles(request, onUpdate: { [weak self] partial in
                     guard let self, !Task.isCancelled, revision == self.searchRevision else { return }
+                    // A refresh must not replace hydrated cards with filename-only batches.
+                    guard !keepCurrentCards else { return }
                     self.results = partial
                     if !partial.contains(where: { $0.id == self.selectedID }) { self.selectedID = partial.first?.id }
                 })

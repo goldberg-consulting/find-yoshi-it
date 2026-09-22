@@ -103,17 +103,35 @@ struct QuickSearchView: View {
                         let other = model.documents.filter { !SearchPresentation.isDocument(extension: $0.fileExtension) }
                         if !documents.isEmpty {
                             sectionLabel("Documents")
-                            ForEach(documents) { document in resultRow(.document(document)) }
+                            ForEach(ResultGroup.make(documents)) { group in groupedRows(group) }
                         }
                         if !other.isEmpty {
                             sectionLabel("Other files")
-                            ForEach(other) { document in resultRow(.document(document)) }
+                            ForEach(ResultGroup.make(other)) { group in groupedRows(group) }
                         }
                     }.padding(.horizontal, 10).padding(.vertical, 8)
                 }
                 .onChange(of: model.selectedID) { _, selection in
                     guard let selection else { return }
                     proxy.scrollTo(selection)
+                }
+            }
+        }
+    }
+
+    private func groupedRows(_ group: ResultGroup) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            resultRow(.document(group.first))
+            if group.results.count > 1 {
+                Button { model.toggleGroup(group.id) } label: {
+                    Label("\(group.results.count) locations / versions", systemImage: model.expandedGroups.contains(group.id) ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 11)).foregroundStyle(Palette.accent)
+                }.buttonStyle(.plain).padding(.leading, 50)
+                .accessibilityLabel("Toggle \(group.first.filename), \(group.results.count) locations or versions")
+                if model.expandedGroups.contains(group.id) {
+                    ForEach(Array(group.results.dropFirst()), id: \.path) { document in
+                        resultRow(.document(document)).padding(.leading, 14)
+                    }
                 }
             }
         }

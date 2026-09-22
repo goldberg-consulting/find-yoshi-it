@@ -50,6 +50,7 @@ final class QuickSearchModel: ObservableObject {
     @Published private(set) var category: QuickSearchCategory = .all
     @Published private(set) var applications: [ApplicationRecord] = []
     @Published private(set) var documents: [SearchResult] = []
+    @Published private(set) var expandedGroups = Set<String>()
     @Published private(set) var selectedID: String?
     @Published private(set) var searchingDocuments = false
     @Published private(set) var errorMessage: String?
@@ -83,7 +84,7 @@ final class QuickSearchModel: ObservableObject {
     }
 
     var items: [QuickSearchItem] {
-        applications.map(QuickSearchItem.application) + documents.map(QuickSearchItem.document)
+        applications.map(QuickSearchItem.application) + ResultGroup.make(documents).flatMap { expandedGroups.contains($0.id) ? $0.results : [$0.first] }.map(QuickSearchItem.document)
     }
 
     var isEmptyQuery: Bool { query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
@@ -118,6 +119,7 @@ final class QuickSearchModel: ObservableObject {
 
     func setQuery(_ value: String) {
         revision += 1
+        if query != value { expandedGroups = [] }
         query = value
         searchStatus = nil
         errorMessage = nil
@@ -157,6 +159,11 @@ final class QuickSearchModel: ObservableObject {
                 } else { self.errorMessage = "Documents could not be searched. \(error.localizedDescription)" }
             }
         }
+    }
+
+    func toggleGroup(_ id: String) {
+        if !expandedGroups.insert(id).inserted { expandedGroups.remove(id) }
+        restoreSelection()
     }
 
     func moveSelection(_ offset: Int) {
