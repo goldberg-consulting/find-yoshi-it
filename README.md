@@ -1,12 +1,20 @@
 # Find Yoshi IT
 
-Pronounced **“find yo shit.”**
+### Pronounced “find yo shit.” Built for the moment you have to.
 
-A native macOS launcher and local document search app. Find applications by name, then search filenames and the passages inside your documents. Your files stay where they are; extraction, OCR, embeddings, and the search index stay on your Mac.
+You saved it somewhere sensible. Unfortunately, that was three Tuesdays ago, and the sensible place was a folder called `New Folder (7)`.
 
-## Quick Search
+**Find Yoshi IT** is a native macOS launcher and local document search app. Find the app, the filename, or the sentence you remember from a PDF whose name has completely escaped you.
 
-Press **Command–Space**, type a name or query, use the arrow keys to select a result, and press **Return** to open it. **Escape** closes the panel.
+Your files stay where you put them. Search, OCR, embeddings, and the index stay on your Mac. Your NAS may leave the chat. Your catalog does not.
+
+[**Download the latest release**](https://github.com/goldberg-consulting/find-yoshi-it/releases/latest) · macOS 14+ · Release downloads currently target Apple silicon
+
+## Command–Space. Summon the thing.
+
+Press **Command–Space**, type a name or query, use the arrow keys to select a result, and press **Return** to open it. **Escape** closes the panel. **Right-click a result → Reveal in Finder** takes you to the actual file or app without opening it. This also works for individual copies in expanded location/version groups.
+
+Because sometimes you don’t want to read `final_FINAL_v6_actually_final.pdf`. You want to know where it lives.
 
 - **Command–1:** applications
 - **Command–2:** documents
@@ -19,20 +27,24 @@ Dependency folders such as `.venv` and `node_modules` are hidden from ordinary r
 
 If Spotlight already owns Command–Space, disable **Show Spotlight search** in System Settings → Keyboard → Keyboard Shortcuts → Spotlight. The app reports shortcut conflicts; it does not change system shortcuts itself.
 
-## Your library
+## Your library: a controlled archaeological dig
 
 Use **Add a source** to choose folders, external drives, or mounted SMB shares. For a network share, enter your server address and connect through macOS. Credentials are handled by macOS, not stored by this app. Adding a connection alone does not start indexing.
 
-Remembered SMB sources survive disconnects and app restarts. FindShit checks after Ethernet/Wi-Fi changes, wake, and mount changes, with a one-minute retry while running. Set the home Wi-Fi name in **Library → Home Network…** (also in the app menu). It defaults to **Gondor**, is saved across launches, and takes effect immediately; known other Wi-Fi networks suppress automatic reconnects. On Ethernet, or when macOS hides the Wi-Fi name, the saved NAS address must answer a bounded SMB reachability check before reconnecting. The home NAS is **UNAS-Pro** (shares shown in Finder: `16WestfieldStorage`, `Personal-Drive`, and `thebookvault`); only sources explicitly added to the library are reconnected and indexed.
+### Your NAS has left the chat
 
-Background reconnects use macOS-saved credentials without sign-in dialogs, allow at most two pending mounts, and cancel mount attempts after 20 seconds. Paused sources are excluded. Missing shares keep their catalog and offline-content settings; returning mounts must match the saved filesystem identity, including the account, before scanning resumes. If saved credentials cannot reconnect, use **Add a source → Connect** to sign in again. Network availability probes have a three-second caller deadline so an unresponsive mount does not block the search engine during routine checks.
+Unplug Ethernet. Wander onto Wi-Fi. Close the laptop. The shares may disappear; their catalog stays put. Remembered SMB sources survive disconnects and app restarts. The app checks after Ethernet/Wi-Fi changes, wake, and mount changes, with a one-minute retry while running. Set the home Wi-Fi name in **Library → Home Network…** (also in the app menu). It defaults to **Gondor**, is saved across launches, and takes effect immediately; known other Wi-Fi networks suppress automatic reconnects. On Ethernet, or when macOS hides the Wi-Fi name, the saved NAS address must answer a bounded SMB reachability check before reconnecting. Only sources you explicitly add to the library are reconnected and indexed. Gondor is a default, not a networking protocol; please replace it if your router owes allegiance to another kingdom.
+
+No dramatic “WHERE IS THE SERVER?” sign-in parade: background reconnects use macOS-saved credentials without sign-in dialogs, allow at most two pending mounts, and cancel mount attempts after 20 seconds. Paused sources are excluded. Missing shares keep their catalog and offline-content settings; returning mounts must match the saved filesystem identity, including the account, before scanning resumes. If saved credentials cannot reconnect, use **Add a source → Connect** to sign in again. Network availability probes have a three-second caller deadline so an unresponsive mount does not block the search engine during routine checks.
 
 
 Local changes use persistent filesystem-event checkpoints and a durable reconciliation queue. Network sources reconcile periodically and on reconnect. Closing the library window leaves the menu-bar app running. **Launch at Login** is optional.
 
 **Source health** reports indexing progress, unsupported formats, failures, and local index size. Source settings control exclusions, OCR, and whether cached passages remain searchable offline. Removing a source removes its cached index, not the original files.
 
-## Search and extraction
+## It reads the documents. You get the credit.
+
+A filename is a clue. “That paragraph about replication” is also a clue. Here’s what does the digging:
 
 - Filename and full-text retrieval use SQLite FTS5, including an indexed filename substring lookup.
 - **Names** puts filename matches first, followed by matching contents; macOS metadata supplements local filenames during indexing.
@@ -43,7 +55,7 @@ Local changes use persistent filesystem-event checkpoints and a durable reconcil
 
 No query or document telemetry, cloud inference, or bundled remote model service is used. Network access is needed when you connect to a share. The optional benchmark script separately downloads a model for local evaluation.
 
-## Build and run
+## Build it yourself, you magnificent nerd
 
 Requires Xcode with the macOS SDK and Swift 6. Targets macOS 14 or later.
 
@@ -65,19 +77,21 @@ Internal module names, the bundle identifier, and `~/Library/Application Support
 
 Development options include `--data-dir /absolute/path`, `--index-folder /absolute/path`, `--search 'query'`, and `--smoke-test`. Keep the index on local storage rather than SMB. Generated artifacts and runtime databases are excluded from version control.
 
-## Limits and validation
+## Things this app cannot manifest through sheer confidence
 
-This is an early implementation. Million-file performance and retrieval quality on representative user corpora are not validated. Slow or disconnected shares can delay filesystem work. Semantic search currently supports English; embedding relevance remains experimental and must be evaluated against representative queries.
+This is an early implementation, not an omniscient filing goblin. Million-file performance and retrieval quality on representative user corpora are not validated. Slow or disconnected shares can delay filesystem work. Semantic search currently supports English; embedding relevance remains experimental and must be evaluated against representative queries.
 
 Extraction has per-file size, passage, page, and OCR limits. Partial coverage is reported. Office embedded objects, iWork, archives, mail connectors, and audio/video transcription are not implemented. Offline excerpts reflect the last confirmed access state; reconnecting permits fresh permission checks.
 
-Tests exercise indexing persistence, filesystem replay, extraction, access rules, metadata queries, application discovery, ranking, and keyboard opening. Fixtures are synthetic and created in temporary folders.
+The test suite exercises indexing persistence, filesystem replay, extraction, access rules, metadata queries, application discovery, ranking, keyboard opening, and revealing results in Finder. Fixtures are synthetic and created in temporary folders.
 
 The optional retrieval benchmark uses `Tests/Fixtures/retrieval-benchmark.json`, `scripts/benchmark-apple.swift`, and `scripts/benchmark-retrieval.py`. It requires Python with `numpy` and `fastembed`; the app itself does not. The fixture is a small hand-authored sanity check, not a benchmark of private documents. Do not commit benchmark outputs from a real library.
 
 Implementation references: [Apple sentence embeddings](https://developer.apple.com/documentation/naturallanguage/nlembedding/sentenceembedding(for:)), [Apple text recognition](https://developer.apple.com/documentation/vision/vnrecognizetextrequest), and [SQLite FTS5](https://www.sqlite.org/fts5.html).
 
-## Search latency and accuracy tools
+## For people who bring a stopwatch to a search box
+
+Respect. Here are the instruments.
 
 Names, contents, and metadata run independently and publish results as each channel finishes.
 Dedicated read-only WAL connections keep name lookup, content search, and previews separate from
