@@ -5,6 +5,8 @@ public actor SearchEngine {
     let database: Database
     let encoder = SemanticEncoder()
     var activeScans = Set<String>()
+    var pendingScanScopes: [String: [String]] = [:]
+    var priorityScanScopes: [String: [String]] = [:]
     let databaseURL: URL
     let onAccessRevoked: (@Sendable (Int64) -> Void)?
     var revokedFiles: [Int64: Date] = [:]
@@ -17,6 +19,14 @@ public actor SearchEngine {
 
     public func invalidateAccess(fileID: Int64) throws {
         try revokeFile(fileID)
+    }
+
+    public func sourceIsPaused(_ id: String) throws -> Bool {
+        try rawSource(id).int("paused") != 0
+    }
+
+    public func sourceIsOnline(_ id: String) throws -> Bool {
+        try rawSource(id).string("availability") == "online"
     }
 
     public func sources() throws -> [SourceRecord] {

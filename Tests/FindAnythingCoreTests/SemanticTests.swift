@@ -3,6 +3,34 @@ import XCTest
 @testable import FindAnythingCore
 
 final class SemanticTests: XCTestCase {
+    func testParallelEmbeddingMatchesSerialEncodingAndSkipsLegacyBuckets() async throws {
+        let encoder = SemanticEncoder()
+        guard encoder.isAvailable else { throw XCTSkip("Local sentence model unavailable") }
+        let inputs = (0..<64).map { EmbeddingInput(id: Int64($0), text: "Document \($0) describes reliable incremental indexing and network storage.") }
+        // Warm both paths before measuring this synthetic batch.
+        _ = encoder.encode(inputs[0].text)
+        _ = try await EmbeddingWorkers.shared.encode(inputs)
+        let serialStart = ContinuousClock.now
+        let expected = inputs.map { SemanticEncoder.pack(encoder.encode($0.text)!) }
+        let serialTime = serialStart.duration(to: .now)
+        let parallelStart = ContinuousClock.now
+        let actual = try await EmbeddingWorkers.shared.encode(inputs)
+        let parallelTime = parallelStart.duration(to: .now)
+        XCTAssertEqual(actual.map(\.id), inputs.map(\.id))
+        XCTAssertEqual(actual.map(\.data), expected)
+        XCTAssertTrue(actual.allSatisfy { $0.modelID == encoder.modelID })
+        print("Embedding batch (64 passages): serial=\(serialTime), two workers=\(parallelTime)")
+    }
+
+    func testCancelledEmbeddingBatchDoesNotPublishResults() async throws {
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await EmbeddingWorkers.shared.encode([EmbeddingInput(id: 1, text: "Cancelled indexing")])
+        }
+        do { _ = try await task.value; XCTFail("Cancelled work must throw") }
+        catch { XCTAssertTrue(error is CancellationError) }
+    }
+
     func testSmallCollectionSemanticSearchDoesNotDependOnBucketRecall() async throws {
         guard SemanticEncoder().isAvailable else { throw XCTSkip("Local sentence model unavailable") }
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -16,7 +44,7 @@ final class SemanticTests: XCTestCase {
         let source = try await engine.addSource(url: folder)
         try await engine.scan(sourceID: source.id)
         let database = try Database(url: url)
-        try database.execute("DELETE FROM vector_buckets")
+        XCTAssertEqual(try database.rows("SELECT COUNT(*) AS n FROM vector_buckets").first?.int("n"), 0)
         let results = try await engine.search(SearchRequest(query: text, mode: .semantic, sourceID: source.id))
         XCTAssertEqual(results.first?.filename, "decision.md")
     }

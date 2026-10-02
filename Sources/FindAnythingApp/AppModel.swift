@@ -60,6 +60,10 @@ final class AppModel: ObservableObject {
     private var applicationSearchTask: Task<Void, Never>?
     private var readerTask: Task<Void, Never>?
     private var scanTask: Task<Void, Never>?
+    private var changeScanTask: Task<Void, Never>?
+    private var pendingChanges: [String] = []
+    private var activeScanSourceID: String?
+    private var activeChangeSourceID: String?
     private var reconciliationTask: Task<Void, Never>?
     private var searchRevision = 0
     private var searchContext: [String]?
@@ -75,7 +79,7 @@ final class AppModel: ObservableObject {
 
     var selectedResult: SearchResult? { results.first { $0.id == selectedID } }
     var scopedSource: SourceRecord? { sources.first { $0.id == sourceID } }
-    var isIndexing: Bool { scanTask != nil }
+    var isIndexing: Bool { scanTask != nil || changeScanTask != nil }
     var selectedPassage: Passage? {
         passages.first { $0.id == selectedPassageID } ?? selectedResult?.passages.first ?? passages.first
     }
@@ -295,30 +299,85 @@ final class AppModel: ObservableObject {
                 } catch { self.errorMessage = error.localizedDescription }
             }
         } else {
-            enqueueScan(key, changesOnly: true)
+            enqueueChangedSource(key)
+        }
+    }
+
+    /// Reserve a second lane for filesystem changes. A bulk scan may continue
+    /// awaiting disk/OCR while a different source publishes its recent edits.
+    private func enqueueChangedSource(_ id: String) {
+        if !pendingChanges.contains(id) { pendingChanges.append(id) }
+        guard changeScanTask == nil else { return }
+        changeScanTask = Task { [weak self] in
+            guard let self, let engine = self.engine, let journal = self.changeJournal else { return }
+            defer {
+                self.activeChangeSourceID = nil
+                self.changeScanTask = nil
+                if self.scanTask == nil { self.progress = nil }
+                if let next = self.pendingChanges.first { self.enqueueChangedSource(next) }
+            }
+            while !self.pendingChanges.isEmpty && !Task.isCancelled {
+                let id = self.pendingChanges.removeFirst()
+                do {
+                    guard let batch = try journal.pending(key: id) else { continue }
+                    try await engine.prioritizeScanScopes(sourceID: id, scopes: batch.scopes)
+                    self.activeChangeSourceID = id
+                    let performed = try await engine.scan(sourceID: id, scopes: batch.scopes) { [weak self] update in
+                        await self?.receive(update)
+                    }
+                    if performed, try await engine.sourceIsOnline(id) {
+                        try journal.acknowledge(key: id, through: batch.through)
+                    } else if !performed {
+                        // Never run overlapping generations for the same source.
+                        self.enqueueScan(id, changesOnly: true)
+                    }
+                } catch is CancellationError { break }
+                catch { if !Task.isCancelled { self.errorMessage = error.localizedDescription } }
+                self.activeChangeSourceID = nil
+                await self.refresh()
+                self.scheduleSearch(immediate: true)
+            }
         }
     }
 
     func enqueueScan(_ id: String, verifyAll: Bool = false, changesOnly: Bool = false) {
         if !changesOnly { fullScanSources.insert(id) }
         if verifyAll { verificationSources.insert(id) }
-        guard !queuedSources.contains(id) else { return }
-        queuedSources.append(id)
+        if queuedSources.contains(id) {
+            if changesOnly {
+                queuedSources.removeAll { $0 == id }
+                queuedSources.insert(id, at: 0)
+            }
+            return
+        }
+        if changesOnly { queuedSources.insert(id, at: 0) }
+        else { queuedSources.append(id) }
         guard scanTask == nil else { return }
         scanTask = Task { [weak self] in
             guard let self, let engine = self.engine else { return }
             while !self.queuedSources.isEmpty && !Task.isCancelled {
                 let next = self.queuedSources.removeFirst()
-                self.progress = IndexProgress(sourceID: next, phase: "Preparing")
+                if self.activeChangeSourceID == next {
+                    self.queuedSources.append(next)
+                    do { try await Task.sleep(for: .milliseconds(50)) } catch { break }
+                    continue
+                }
+                self.activeScanSourceID = next
+                if self.activeChangeSourceID == nil { self.progress = IndexProgress(sourceID: next, phase: "Preparing") }
                 do {
                     let verify = self.verificationSources.remove(next) != nil
                     let full = self.fullScanSources.remove(next) != nil
                     let batch = try self.changeJournal?.pending(key: next)
-                    try await engine.scan(sourceID: next, verifyAll: verify, scopes: full ? (batch == nil ? nil : [""]) : batch?.scopes) { [weak self] update in
+                    let performed = try await engine.scan(sourceID: next, verifyAll: verify, scopes: full ? (batch == nil ? nil : [""]) : batch?.scopes) { [weak self] update in
                         await self?.receive(update)
                     }
-                    if let batch, try await engine.sources().first(where: { $0.id == next })?.availability == .online {
+                    if performed, let batch, try await engine.sourceIsOnline(next) {
                         try self.changeJournal?.acknowledge(key: next, through: batch.through)
+                    } else if !performed, try await !engine.sourceIsPaused(next) {
+                        // The change lane may have acquired this source between
+                        // our queue check and the actor call. Preserve full/verify
+                        // requests rather than silently dropping them.
+                        self.enqueueScan(next, verifyAll: verify, changesOnly: !full)
                     }
                 } catch is CancellationError {
                     break
@@ -328,7 +387,8 @@ final class AppModel: ObservableObject {
                 await self.refresh()
                 self.scheduleSearch(immediate: true)
             }
-            self.progress = nil
+            self.activeScanSourceID = nil
+            if self.activeChangeSourceID == nil { self.progress = nil }
             self.scanTask = nil
             await self.refresh()
             self.scheduleSearch(immediate: true)
@@ -341,6 +401,7 @@ final class AppModel: ObservableObject {
     }
 
     private func receive(_ update: IndexProgress) async {
+        if let activeChangeSourceID, activeChangeSourceID != update.sourceID { return }
         progress = update
         if Date().timeIntervalSince(lastProgressRefresh) >= 1 {
             lastProgressRefresh = Date()
@@ -355,7 +416,9 @@ final class AppModel: ObservableObject {
     func stopIndexing() {
         queuedSources.removeAll()
         verificationSources.removeAll()
+        pendingChanges.removeAll()
         scanTask?.cancel()
+        changeScanTask?.cancel()
     }
 
     func scanAll() {
@@ -381,7 +444,9 @@ final class AppModel: ObservableObject {
                 try await engine.setSourcePaused(id: source.id, paused: paused)
                 if paused {
                     queuedSources.removeAll { $0 == source.id }
-                    if progress?.sourceID == source.id { scanTask?.cancel() }
+                    pendingChanges.removeAll { $0 == source.id }
+                    if activeScanSourceID == source.id { scanTask?.cancel() }
+                    if activeChangeSourceID == source.id { changeScanTask?.cancel() }
                 }
                 await refresh()
                 if !paused { enqueueScan(source.id) }
@@ -407,13 +472,17 @@ final class AppModel: ObservableObject {
     }
 
     func remove(_ source: SourceRecord) {
-        let activeScan = progress?.sourceID == source.id ? scanTask : nil
-        if progress?.sourceID == source.id { stopIndexing() }
+        let activeScan = activeScanSourceID == source.id ? scanTask : nil
+        let activeChange = activeChangeSourceID == source.id ? changeScanTask : nil
+        activeScan?.cancel()
+        activeChange?.cancel()
+        pendingChanges.removeAll { $0 == source.id }
         queuedSources.removeAll { $0 == source.id }
         Task {
             guard let engine else { return }
             do {
                 await activeScan?.value
+                await activeChange?.value
                 try await watcher?.forget(source.id)
                 try await engine.removeSource(id: source.id)
                 if sourceID == source.id { sourceID = nil }
