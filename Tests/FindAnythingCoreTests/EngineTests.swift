@@ -25,6 +25,79 @@ final class EngineTests: XCTestCase {
         return (engine,source)
     }
 
+    func testAnotherSourceCanPublishWhileBulkScanWaitsAndSameSourceCannotOverlap() async throws {
+        _ = try write("bulk.md", "Bulk indexing fixture")
+        let fresh = workspace.appendingPathComponent("fresh")
+        try FileManager.default.createDirectory(at: fresh, withIntermediateDirectories: true)
+        try Data("Recent priorityneedle".utf8).write(to: fresh.appendingPathComponent("recent.md"))
+        let (engine, bulk) = try await makeEngine()
+        let urgent = try await engine.addSource(url: fresh)
+        let gate = ScanTestGate()
+        let started = expectation(description: "Bulk scan reaches a safe suspension point")
+        let bulkTask = Task {
+            try await engine.scan(sourceID: bulk.id) { update in
+                if update.phase == "Discovering files" {
+                    started.fulfill()
+                    await gate.wait()
+                }
+            }
+        }
+        await fulfillment(of: [started], timeout: 3)
+        do {
+            let overlapping = try await engine.scan(sourceID: bulk.id)
+            XCTAssertFalse(overlapping)
+            let scanned = try await engine.scan(sourceID: urgent.id, scopes: [""])
+            XCTAssertTrue(scanned)
+            let results = try await engine.search(SearchRequest(query: "priorityneedle", mode: .exact))
+            XCTAssertEqual(results.first?.filename, "recent.md")
+            await gate.release()
+            _ = try await bulkTask.value
+        } catch {
+            await gate.release()
+            _ = try? await bulkTask.value
+            throw error
+        }
+    }
+
+    func testChangedSubtreeJumpsAheadOfAnActiveFullScan() async throws {
+        _ = try write("a/file.md", "Background first")
+        _ = try write("b/file.md", "Background second")
+        _ = try write("z/file.md", "Fresh urgentcontent")
+        let (engine, source) = try await makeEngine()
+        let visited = ScanVisitRecorder()
+        try await engine.scan(sourceID: source.id) { update in
+            guard update.phase == "Discovering files" else { return }
+            await visited.append(update.currentPath)
+            if update.currentPath.isEmpty {
+                try? await engine.prioritizeScanScopes(sourceID: source.id, scopes: ["z"])
+            }
+        }
+        let paths = await visited.paths
+        XCTAssertEqual(Array(paths.prefix(2)), ["", "z"])
+        let results = try await engine.search(SearchRequest(query: "urgentcontent", mode: .exact))
+        XCTAssertEqual(results.first?.filename, "file.md")
+    }
+
+    func testConcurrentSourcesReuseIdenticalContentWithoutLosingPassages() async throws {
+        let text = "Parallel sharedneedle document content for both source locations."
+        _ = try write("same.md", text)
+        let other = workspace.appendingPathComponent("other")
+        try FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
+        try Data(text.utf8).write(to: other.appendingPathComponent("same.md"))
+        let (engine, first) = try await makeEngine()
+        let second = try await engine.addSource(url: other)
+        async let firstScan = engine.scan(sourceID: first.id)
+        async let secondScan = engine.scan(sourceID: second.id)
+        let performed = try await (firstScan, secondScan)
+        XCTAssertTrue(performed.0 && performed.1)
+        let results = try await engine.search(SearchRequest(query: "sharedneedle", mode: .exact))
+        XCTAssertEqual(results.count, 2)
+        XCTAssertEqual(Set(results.compactMap { $0.passages.first?.id }).count, 1)
+        let stats = try await engine.statistics()
+        XCTAssertEqual(stats.files, 2)
+        XCTAssertEqual(stats.passages, 1)
+    }
+
     func testScopedReconciliationUpdatesRenamesAndDeletesWithoutScanningOtherFolders() async throws {
         let original = try write("notes/old.md", "Old cdcphrase")
         let untouched = try write("unrelated/stable.md", "Preserved stablephrase")
@@ -282,4 +355,23 @@ final class EngineTests: XCTestCase {
         let redirected = try await engine.search(SearchRequest(query:"outsidemarker",mode:.exact))
         XCTAssertTrue(redirected.isEmpty)
     }
+}
+
+private actor ScanTestGate {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var released = false
+    func wait() async {
+        if released { return }
+        await withCheckedContinuation { continuation = $0 }
+    }
+    func release() {
+        released = true
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
+private actor ScanVisitRecorder {
+    var paths: [String] = []
+    func append(_ path: String) { paths.append(path) }
 }

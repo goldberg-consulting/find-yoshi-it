@@ -1,13 +1,18 @@
 import Foundation
 
 extension SearchEngine {
-    public func scan(sourceID: String, verifyAll: Bool = false, scopes requestedScopes: [String]? = nil, progress: @escaping @Sendable (IndexProgress) async -> Void = { _ in }) async throws {
-        guard !activeScans.contains(sourceID) else { return }
+    @discardableResult
+    public func scan(sourceID: String, verifyAll: Bool = false, scopes requestedScopes: [String]? = nil, progress: @escaping @Sendable (IndexProgress) async -> Void = { _ in }) async throws -> Bool {
+        guard !activeScans.contains(sourceID) else { return false }
         let row = try rawSource(sourceID)
-        guard row.int("paused") == 0 else { return }
+        guard row.int("paused") == 0 else { return false }
         guard let root = try probe(row) else { throw DatabaseError(message:"The source is offline or inaccessible. Its existing index has been retained.") }
         activeScans.insert(sourceID)
-        defer { activeScans.remove(sourceID) }
+        defer {
+            activeScans.remove(sourceID)
+            pendingScanScopes.removeValue(forKey: sourceID)
+            priorityScanScopes.removeValue(forKey: sourceID)
+        }
         // Interrupted scoped scans restart as a full reconciliation; full scans retain their durable frontier.
         let interruptedScopedScan = row.optionalString("scan_scopes") != nil
         var scopes = ChangeJournal.minimalScopes((verifyAll || interruptedScopedScan || row.optionalString("scan_generation") != nil) ? [""] : (requestedScopes ?? [""]))
@@ -41,7 +46,7 @@ extension SearchEngine {
         }
         do {
             // Persist the frontier, keeping memory bounded to one directory plus small work batches.
-            while let directory = try database.rows("SELECT relative_path FROM scan_directories WHERE source_id=? AND done=0 ORDER BY CASE WHEN relative_path='Documents' OR relative_path LIKE 'Documents/%' THEN 0 WHEN relative_path='Desktop' OR relative_path LIKE 'Desktop/%' THEN 1 ELSE 2 END,length(relative_path),relative_path LIMIT 1",[.text(sourceID)]).first {
+            while let directory = try nextScanDirectory(sourceID) {
                 try checkScan(sourceID)
                 let relative = directory.string("relative_path")
                 let folder = relative.isEmpty ? root : root.appendingPathComponent(relative,isDirectory:true)
@@ -85,7 +90,7 @@ extension SearchEngine {
                 }
                 try database.execute("UPDATE scan_directories SET done=1 WHERE source_id=? AND relative_path=?",[.text(sourceID),.text(relative)])
                 // Publish useful content and vectors during discovery, not after the entire tree finishes.
-                processed += try await drainTextJobs(root: root, sourceID: sourceID, generation: generation, verifyAll: verifyAll, maximum: 12)
+                processed += try await drainTextJobs(root: root, sourceID: sourceID, generation: generation, verifyAll: verifyAll, maximum: 12, preferredScope: relative)
 
             }
             try checkScan(sourceID)
@@ -144,11 +149,37 @@ extension SearchEngine {
             }
             throw error
         }
+        return true
     }
 
-    private func drainTextJobs(root: URL, sourceID: String, generation: String, verifyAll: Bool, maximum: Int) async throws -> Int {
+    /// Move changed subtrees ahead of an active full scan, including folders it
+    /// already visited. The durable change journal remains authoritative until
+    /// a completed reconciliation acknowledges its batch.
+    public func prioritizeScanScopes(sourceID: String, scopes: [String]) throws {
+        guard activeScans.contains(sourceID), try rawSource(sourceID).optionalString("scan_scopes") == nil else { return }
+        pendingScanScopes[sourceID] = ChangeJournal.minimalScopes((pendingScanScopes[sourceID] ?? []) + scopes)
+    }
+
+    private func nextScanDirectory(_ sourceID: String) throws -> SQLRow? {
+        if let changed = pendingScanScopes.removeValue(forKey: sourceID) {
+            try database.transaction {
+                for scope in changed {
+                    try database.execute("UPDATE scan_directories SET done=0 WHERE source_id=? AND (?='' OR relative_path=? OR substr(relative_path,1,length(?))=?)", [.text(sourceID), .text(scope), .text(scope), .text(scope + "/"), .text(scope + "/")])
+                    try database.execute("INSERT OR IGNORE INTO scan_directories(source_id,relative_path) VALUES(?,?)", [.text(sourceID), .text(scope)])
+                }
+            }
+            priorityScanScopes[sourceID] = ChangeJournal.minimalScopes((priorityScanScopes[sourceID] ?? []) + changed)
+        }
+        while let scope = priorityScanScopes[sourceID]?.first {
+            if let next = try database.rows("SELECT relative_path FROM scan_directories WHERE source_id=? AND done=0 AND (?='' OR relative_path=? OR substr(relative_path,1,length(?))=?) ORDER BY length(relative_path),relative_path LIMIT 1", [.text(sourceID), .text(scope), .text(scope), .text(scope + "/"), .text(scope + "/")]).first { return next }
+            priorityScanScopes[sourceID]?.removeFirst()
+        }
+        return try database.rows("SELECT relative_path FROM scan_directories WHERE source_id=? AND done=0 ORDER BY CASE WHEN relative_path='Documents' OR relative_path LIKE 'Documents/%' THEN 0 WHEN relative_path='Desktop' OR relative_path LIKE 'Desktop/%' THEN 1 ELSE 2 END,length(relative_path),relative_path LIMIT 1", [.text(sourceID)]).first
+    }
+
+    private func drainTextJobs(root: URL, sourceID: String, generation: String, verifyAll: Bool, maximum: Int, preferredScope: String) async throws -> Int {
         var processed = 0
-        while processed < maximum, let job = try database.rows("SELECT f.*,j.phase,j.attempts FROM jobs j JOIN files f ON f.id=j.file_id WHERE f.source_id=? AND j.phase='text' AND j.retry_at<=? AND f.generation=? ORDER BY f.id LIMIT 1", [.text(sourceID), .real(Date().timeIntervalSince1970), .text(generation)]).first {
+        while processed < maximum, let job = try database.rows("SELECT f.*,j.phase,j.attempts FROM jobs j JOIN files f ON f.id=j.file_id WHERE f.source_id=? AND j.phase='text' AND j.retry_at<=? AND f.generation=? ORDER BY CASE WHEN ?='' OR substr(f.relative_path,1,length(?))=? THEN 0 ELSE 1 END,f.id LIMIT 1", [.text(sourceID), .real(Date().timeIntervalSince1970), .text(generation), .text(preferredScope), .text(preferredScope + "/"), .text(preferredScope + "/")]).first {
             try checkScan(sourceID)
             do { try await process(job, root: root, sourceID: sourceID, ocr: false, verifyAll: verifyAll) }
             catch is CancellationError { throw CancellationError() }
@@ -228,8 +259,13 @@ extension SearchEngine {
         }
         try database.transaction {
             let contentID: Int64
-            if let cached { contentID = cached.int("id") }
-            else {
+            if let current = try database.rows("SELECT id FROM contents WHERE fingerprint=? AND extractor=?", [.text(snapshot.hash), .text(extractor)]).first {
+                contentID = current.int("id")
+            } else if cached != nil {
+                // The cached version disappeared during the final file stamp read.
+                // Retry extraction instead of publishing an empty set of passages.
+                throw DatabaseError(message: "Cached content changed during indexing; retrying.")
+            } else {
                 try database.execute("INSERT INTO contents(fingerprint,extractor,status,detail) VALUES(?,?,?,?)",[.text(snapshot.hash),.text(extractor),.text(result.status.rawValue),result.detail.map(SQLValue.text) ?? .null])
                 contentID = database.lastID
                 for (ordinal,passage) in result.passages.enumerated() {
@@ -259,19 +295,26 @@ extension SearchEngine {
                 AND NOT EXISTS(SELECT 1 FROM vectors v WHERE v.passage_id=p.id AND v.model=?) ORDER BY p.id LIMIT 32
                 """,[.integer(cursor), contentID.map(SQLValue.integer) ?? .null, contentID.map(SQLValue.integer) ?? .null, .text(sourceID),.text(encoder.modelID)])
             guard !batch.isEmpty else { break }
-            for row in batch {
-                try checkScan(sourceID)
-                if let vector = encoder.encode(row.string("text")) {
-                    try database.transaction {
-                        try database.execute("DELETE FROM vectors WHERE passage_id=?",[.integer(row.int("id"))])
-                        try database.execute("INSERT INTO vectors(passage_id,model,vector) VALUES(?,?,?)",[.integer(row.int("id")),.text(encoder.modelID),.blob(SemanticEncoder.pack(vector))])
-                        for bucket in SemanticEncoder.buckets(for:vector) { try database.execute("INSERT INTO vector_buckets(bucket,passage_id) VALUES(?,?)",[.integer(bucket),.integer(row.int("id"))]) }
-                    }
+            let inputs = batch.map { EmbeddingInput(id: $0.int("id"), text: $0.string("text")) }
+            let encoded = try await EmbeddingWorkers.shared.encode(inputs)
+            try checkScan(sourceID)
+            // Content can be removed or access revoked while workers run. Validate
+            // ownership again inside the writer actor before attaching any vectors.
+            try database.transaction {
+                for passage in encoded where passage.modelID == encoder.modelID {
+                    guard try !database.rows("""
+                        SELECT p.id FROM passages p WHERE p.id=? AND EXISTS(
+                            SELECT 1 FROM files f WHERE f.content_id=p.content_id
+                            AND f.source_id=? AND f.status<>'denied')
+                        """, [.integer(passage.id), .text(sourceID)]).isEmpty else { continue }
+                    try database.execute("DELETE FROM vectors WHERE passage_id=?", [.integer(passage.id)])
+                    try database.execute("INSERT INTO vectors(passage_id,model,vector) VALUES(?,?,?)", [.integer(passage.id), .text(passage.modelID), .blob(passage.data)])
+                    // Search streams packed vectors directly; legacy LSH buckets
+                    // are retained on disk for compatibility but no longer built.
                     count += 1
                 }
-                cursor = row.int("id")
-                await Task.yield()
             }
+            cursor = batch.last!.int("id")
             await progress(IndexProgress(sourceID:sourceID,phase:"Indexing meaning · \(count) passages",discovered:discovered,processed:processed))
         }
     }
