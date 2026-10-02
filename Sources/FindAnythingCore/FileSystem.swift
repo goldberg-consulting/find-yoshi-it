@@ -44,8 +44,9 @@ enum LocalFiles {
     static let maximumFileBytes: Int64 = 128 * 1024 * 1024
     static func networkRemounts(identity: String) -> [URL] {
         var mounts: UnsafeMutablePointer<statfs>?
-        let count = getmntinfo(&mounts,MNT_NOWAIT)
+        let count = getmntinfo_r_np(&mounts,MNT_NOWAIT)
         guard count > 0, let mounts else { return [] }
+        defer { free(mounts) }
         var results: [URL] = []
         for index in 0..<Int(count) {
             var info = mounts[index]

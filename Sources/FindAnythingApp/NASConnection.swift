@@ -159,19 +159,19 @@ final class NASConnection: ObservableObject {
     }
 }
 
-private struct NASMountResult: Sendable {
+struct NASMountResult: Sendable {
     let status: Int32
     let paths: [String]
 }
 
 /// NetFS requires a dispatch callback queue. Its request pointer stays confined to that queue.
-private final class NASMountWorker: @unchecked Sendable {
+final class NASMountWorker: @unchecked Sendable {
     private let queue = DispatchQueue(label: "local.findanything.nas-connection", qos: .utility)
     private let lock = NSLock()
     private var generation = 0
     private var requestID: AsyncRequestID?
 
-    func connect(url: URL, completion: @escaping @Sendable (NASMountResult) -> Void) {
+    func connect(url: URL, silently: Bool = false, completion: @escaping @Sendable (NASMountResult) -> Void) {
         lock.lock()
         generation += 1
         let requested = generation
@@ -180,7 +180,8 @@ private final class NASMountWorker: @unchecked Sendable {
             guard isCurrent(requested) else { return }
             cancelActiveRequest()
             var startedRequest: AsyncRequestID?
-            let status = NetFSMountURLAsync(url as CFURL, nil, nil, nil, nil, nil,
+            let options = silently ? NSMutableDictionary(dictionary: [kNAUIOptionKey as String: kNAUIOptionNoUI as String]) : nil
+            let status = NetFSMountURLAsync(url as CFURL, nil, nil, nil, options, nil,
                                            &startedRequest, queue) { [weak self] status, completedRequest, mountpoints in
                 guard let self else { return }
                 // A completion can already be queued when Cancel is clicked. Retire its

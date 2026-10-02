@@ -41,6 +41,7 @@ struct FindAnythingApp: App {
         .commands {
             CommandGroup(replacing: .appSettings) {
                 Button("Quick Search Settings…") { runtime.showSetup() }.keyboardShortcut(",")
+                NetworkSettingsMenuButton()
             }
             CommandGroup(replacing: .newItem) {
                 Button("Add Source…") { model.chooseSources() }.keyboardShortcut("o", modifiers: [.command, .shift]).disabled(!model.ready)
@@ -51,12 +52,18 @@ struct FindAnythingApp: App {
                 Button("Quick Search    ⌘ Space") { runtime.showSearch() }
                 Button("Open Library") { runtime.showLibrary() }
                 Divider()
+                NetworkSettingsMenuButton()
                 Button("Reconcile All Sources") { model.scanAll() }.disabled(model.sources.isEmpty)
                 Button("Stop Indexing") { model.stopIndexing() }.disabled(!model.isIndexing)
                 Divider()
                 Button("Source Health") { model.showHealth = true }.keyboardShortcut("i", modifiers: [.command, .shift])
             }
         }
+        Window("Home Network", id: "network-settings") {
+            NetworkSettingsView().environmentObject(model)
+        }
+        .windowResizability(.contentSize)
+        .defaultPosition(.center)
     }
 }
 

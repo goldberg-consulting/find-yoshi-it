@@ -34,11 +34,21 @@ final class AppModel: ObservableObject {
     let applications: ApplicationCatalog
     private var searchHistory: SearchHistory?
 
+    @Published private(set) var homeNetworkName = NetworkSettings().homeNetworkName
+
     init(applications: ApplicationCatalog = ApplicationCatalog()) { self.applications = applications }
+
+    func saveHomeNetworkName(_ name: String) {
+        var settings = NetworkSettings()
+        guard settings.saveHomeNetworkName(name) else { return }
+        homeNetworkName = settings.homeNetworkName
+        networkRecovery?.updateHomeSSID(homeNetworkName)
+    }
     @Published private(set) var applicationCatalogRevision = 0
     private var changeJournal: ChangeJournal?
     private var fullScanSources = Set<String>()
     private var volumeNotifications: AnyCancellable?
+    private var networkRecovery: NetworkShareRecovery?
     var showQuickSearch: (() -> Void)?
     var showShortcutSettings: (() -> Void)?
 
@@ -111,19 +121,22 @@ final class AppModel: ObservableObject {
             await refresh(checkAvailability: true)
             ready = true
             for id in prioritized { enqueueScan(id) }
+            networkRecovery = NetworkShareRecovery(homeSSID: homeNetworkName, targets: { [weak self] in
+                guard let engine = self?.engine else { return [] }
+                return (try? await engine.networkReconnectURLs()) ?? []
+            }, refresh: { [weak self] in
+                guard let self else { return }
+                let offline = Set(self.sources.filter { $0.availability == .offline || $0.availability == .error }.map(\.id))
+                await self.refresh(checkAvailability: true)
+                for source in self.sources where source.kind == .network && source.availability == .online && offline.contains(source.id) {
+                    self.enqueueScan(source.id)
+                }
+            })
             let center = NSWorkspace.shared.notificationCenter
             volumeNotifications = center.publisher(for: NSWorkspace.didMountNotification)
                 .merge(with: center.publisher(for: NSWorkspace.didUnmountNotification), center.publisher(for: NSWorkspace.didWakeNotification))
                 .receive(on: DispatchQueue.main)
-                .sink { [weak self] _ in
-                    Task { @MainActor [weak self] in
-                        guard let self else { return }
-                        await self.refresh(checkAvailability: true)
-                        for source in self.sources where source.kind == .network && source.availability != .paused && source.availability != .offline {
-                            self.enqueueScan(source.id)
-                        }
-                    }
-                }
+                .sink { [weak self] _ in self?.networkRecovery?.check() }
             if arguments.contains("--smoke-test") {
                 let report: [String: Any] = [
                     "app": "Find Yoshi IT", "ready": true, "sourceCount": sources.count,

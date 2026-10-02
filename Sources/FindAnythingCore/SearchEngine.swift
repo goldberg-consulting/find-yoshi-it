@@ -100,9 +100,46 @@ public actor SearchEngine {
         _ = try probe(try rawSource(id))
     }
 
-    public func refreshAvailability() throws {
+    /// Saved identities survive disconnects and restarts; paused scopes never reconnect.
+    public func networkReconnectURLs() throws -> [URL] {
+        let rows = try database.rows("SELECT identity FROM sources WHERE kind='network' AND paused=0")
+        return Array(Set(rows.compactMap { row -> URL? in
+            guard LocalFiles.networkRemounts(identity: row.string("identity")).isEmpty else { return nil }
+            return RememberedNetworkShare.reconnectURL(identity: row.string("identity"))
+        })).sorted { $0.absoluteString < $1.absoluteString }
+    }
+
+    public func refreshAvailability() async throws {
+        let registration = SourceRegistration(timeout: .seconds(3)) { url in
+            let identity = try FolderIdentity.read(url)
+            guard access(url.path, R_OK | X_OK) == 0 else {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+            return RegisteredSource(root: url, identity: identity)
+        }
         for row in try database.rows("SELECT * FROM sources") where !activeScans.contains(row.string("id")) {
-            _ = try probe(row)
+            guard row.string("kind") == "network" else { _ = try probe(row); continue }
+            let id = row.string("id")
+            let candidates = LocalFiles.networkRemounts(identity: row.string("identity"))
+            var available: URL?
+            var denied = false
+            for url in candidates {
+                do {
+                    let inspected = try await registration.inspect(url)
+                    if inspected.identity.identity == row.string("identity") { available = url; break }
+                } catch is CancellationError { throw CancellationError() }
+                catch { denied = denied || LocalFiles.permissionError(error) }
+            }
+            // The actor was released during the bounded filesystem probe.
+            guard !activeScans.contains(id),
+                  let current = try database.rows("SELECT * FROM sources WHERE id=?", [.text(id)]).first,
+                  current.string("identity") == row.string("identity") else { continue }
+            if let available {
+                try database.execute("UPDATE sources SET path=?,availability=?,last_error=NULL WHERE id=?", [.text(available.path), .text(current.int("paused") == 1 ? "paused" : "online"), .text(id)])
+            } else {
+                if denied { try revokeSource(id) }
+                try database.execute("UPDATE sources SET availability=? WHERE id=?", [.text(current.int("paused") == 1 ? "paused" : "offline"), .text(id)])
+            }
         }
     }
 
@@ -133,7 +170,8 @@ public actor SearchEngine {
     func probe(_ row: SQLRow) throws -> URL? {
         var candidates = [URL(fileURLWithPath:row.string("path"),isDirectory:true)]
         if row.string("kind") == "network" {
-            candidates.append(contentsOf:LocalFiles.networkRemounts(identity:row.string("identity")))
+            // Never touch a stale mountpoint or an unrelated local replacement.
+            candidates = LocalFiles.networkRemounts(identity:row.string("identity"))
         }
         for url in candidates {
             do {

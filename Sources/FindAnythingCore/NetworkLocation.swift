@@ -185,3 +185,22 @@ public struct MountedNetworkShare: Identifiable, Sendable, Hashable {
         }
     }
 }
+
+/// Recover only the share URL from a persisted filesystem identity. Never pass stored
+/// credentials to NetFS; macOS supplies its saved credentials without an app prompt.
+public enum RememberedNetworkShare {
+    public static func reconnectURL(identity: String) -> URL? {
+        let parts = identity.split(separator: "|", omittingEmptySubsequences: false)
+        guard parts.count == 3, parts[0] == "smbfs",
+              let share = MountedNetworkShare.parseMount(fileSystem: "smbfs", mountedFrom: String(parts[1]), mountedOn: "/") else { return nil }
+        // Parse again to preserve explicit ports and IPv6 authority syntax.
+        let from = String(parts[1])
+        let source = from.hasPrefix("//") ? String(from.dropFirst(2)) : String(from.dropFirst(6))
+        guard let slash = source.firstIndex(of: "/") else { return nil }
+        let authority = source[..<slash]
+        let server = authority.lastIndex(of: "@").map { String(authority[authority.index(after: $0)...]) } ?? String(authority)
+        guard var components = URLComponents(string: "smb://" + server) else { return nil }
+        components.path = "/" + share.name
+        return components.url.flatMap { try? SMBAddress($0.absoluteString).url }
+    }
+}

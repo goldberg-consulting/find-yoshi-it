@@ -3,6 +3,38 @@ import XCTest
 @testable import FindAnythingCore
 
 final class NetworkLocationTests: XCTestCase {
+    func test_remembered_share_reconnects_without_credentials_or_selected_subfolder() throws {
+        let url = try XCTUnwrap(RememberedNetworkShare.reconnectURL(identity: "smbfs|//DOMAIN;user:secret@UNAS-Pro.local/Personal-Drive|/Documents"))
+        XCTAssertEqual(url.absoluteString, "smb://unas-pro.local/Personal-Drive")
+        XCTAssertNil(url.user)
+        XCTAssertNil(url.password)
+        XCTAssertEqual(RememberedNetworkShare.reconnectURL(identity: "smbfs|//guest@[2001:db8::1]:1445/Team%20Files|/")?.absoluteString, "smb://[2001:db8::1]:1445/Team%20Files")
+        XCTAssertNil(RememberedNetworkShare.reconnectURL(identity: "apfs|disk|/Documents"))
+        XCTAssertNil(RememberedNetworkShare.reconnectURL(identity: "smbfs|//host|/Documents"))
+        XCTAssertNil(RememberedNetworkShare.reconnectURL(identity: "smbfs|//host/Share|/folder|ambiguous"))
+    }
+
+    func test_remembered_network_sources_survive_restart_and_skip_paused_sources() async throws {
+        let workspace = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let databaseURL = workspace.appendingPathComponent("library.sqlite")
+        let engine = try SearchEngine(databaseURL: databaseURL)
+        let source = try await engine.addSource(url: workspace)
+        let database = try Database(url: databaseURL)
+        try database.execute("UPDATE sources SET kind='network',identity=?,availability='offline' WHERE id=?", [.text("smbfs|//user@unas-pro.invalid/Personal-Drive|/Documents"), .text(source.id)])
+        let reopened = try SearchEngine(databaseURL: databaseURL)
+        let urls = try await reopened.networkReconnectURLs()
+        XCTAssertEqual(urls.map(\.absoluteString), ["smb://unas-pro.invalid/Personal-Drive"])
+        try await reopened.refreshAvailability()
+        let retained = try await reopened.sources()
+        XCTAssertEqual(retained.count, 1)
+        XCTAssertEqual(retained.first?.availability, .offline)
+        try database.execute("UPDATE sources SET paused=1 WHERE id=?", [.text(source.id)])
+        let pausedURLs = try await reopened.networkReconnectURLs()
+        XCTAssertTrue(pausedURLs.isEmpty)
+    }
+
     func test_server_names_and_ip_addresses_produce_smb_urls() throws {
         XCTAssertEqual(try SMBAddress(" nas.local ").url.absoluteString, "smb://nas.local")
         XCTAssertEqual(try SMBAddress("192.0.2.100").host, "192.0.2.100")

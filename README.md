@@ -23,6 +23,11 @@ If Spotlight already owns Command–Space, disable **Show Spotlight search** in 
 
 Use **Add a source** to choose folders, external drives, or mounted SMB shares. For a network share, enter your server address and connect through macOS. Credentials are handled by macOS, not stored by this app. Adding a connection alone does not start indexing.
 
+Remembered SMB sources survive disconnects and app restarts. FindShit checks after Ethernet/Wi-Fi changes, wake, and mount changes, with a one-minute retry while running. Set the home Wi-Fi name in **Library → Home Network…** (also in the app menu). It defaults to **Gondor**, is saved across launches, and takes effect immediately; known other Wi-Fi networks suppress automatic reconnects. On Ethernet, or when macOS hides the Wi-Fi name, the saved NAS address must answer a bounded SMB reachability check before reconnecting. The home NAS is **UNAS-Pro** (shares shown in Finder: `16WestfieldStorage`, `Personal-Drive`, and `thebookvault`); only sources explicitly added to the library are reconnected and indexed.
+
+Background reconnects use macOS-saved credentials without sign-in dialogs, allow at most two pending mounts, and cancel mount attempts after 20 seconds. Paused sources are excluded. Missing shares keep their catalog and offline-content settings; returning mounts must match the saved filesystem identity, including the account, before scanning resumes. If saved credentials cannot reconnect, use **Add a source → Connect** to sign in again. Network availability probes have a three-second caller deadline so an unresponsive mount does not block the search engine during routine checks.
+
+
 Local changes use persistent filesystem-event checkpoints and a durable reconciliation queue. Network sources reconcile periodically and on reconnect. Closing the library window leaves the menu-bar app running. **Launch at Login** is optional.
 
 **Source health** reports indexing progress, unsupported formats, failures, and local index size. Source settings control exclusions, OCR, and whether cached passages remain searchable offline. Removing a source removes its cached index, not the original files.
