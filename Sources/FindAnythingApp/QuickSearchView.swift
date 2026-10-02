@@ -56,6 +56,7 @@ struct QuickSearchView: View {
             HStack(spacing: 14) {
                 Text("↑ ↓ Select").accessibilityLabel("Use up and down arrow keys to select a result")
                 Text("↩ Open").accessibilityLabel("Press Return to open the selected result")
+                Text("Right-click for Finder")
                 Text("esc Close").accessibilityLabel("Press Escape to close search")
                 Spacer()
                 Button("Open Library") { model.openLibrary?() }
@@ -179,8 +180,13 @@ struct QuickSearchView: View {
             .contentShape(RoundedRectangle(cornerRadius: 9))
         }
         .buttonStyle(.plain)
+        .contextMenu {
+            Button("Open") { model.open(item) }
+            Button("Reveal in Finder") { model.reveal(item) }
+        }
+        .accessibilityAction(named: Text("Reveal in Finder")) { model.reveal(item) }
         .accessibilityLabel(accessibilityLabel(item))
-        .accessibilityHint("Open this result")
+        .accessibilityHint("Open this result, or use its context menu to reveal it in Finder")
         .accessibilityAddTraits(item.id == model.selectedID ? [.isSelected] : [])
         .id(item.id)
     }

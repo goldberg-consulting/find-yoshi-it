@@ -63,6 +63,8 @@ final class QuickSearchModel: ObservableObject {
 
     private let library: AppModel
     typealias Opener = (QuickSearchItem, @escaping (Error?) -> Void) -> Void
+    typealias Revealer = (URL) throws -> Void
+    private let revealer: Revealer
     private let opener: Opener
     private var applicationTask: Task<Void, Never>?
     private var documentTask: Task<Void, Never>?
@@ -74,9 +76,10 @@ final class QuickSearchModel: ObservableObject {
 
     private var catalogSubscription: AnyCancellable?
 
-    init(library: AppModel, opener: Opener? = nil) {
+    init(library: AppModel, opener: Opener? = nil, revealer: Revealer? = nil) {
         self.library = library
         self.opener = opener ?? Self.openSystemItem
+        self.revealer = revealer ?? Self.revealSystemURL
         catalogSubscription = library.$applicationCatalogRevision.dropFirst().sink { [weak self] _ in
             guard let self, self.isVisible, !self.isEmptyQuery else { return }
             self.searchApplications(revision: self.revision)
@@ -206,6 +209,36 @@ final class QuickSearchModel: ObservableObject {
             if let error { self.errorMessage = "Could not open this item. \(error.localizedDescription)" }
             else { self.dismiss?() }
         }
+    }
+
+    func reveal(_ item: QuickSearchItem) {
+        guard !launching else { return }
+        errorMessage = nil
+        selectedID = item.id
+        let path: String
+        switch item {
+        case .application(let app): path = app.path
+        case .document(let result):
+            guard result.availability != .offline else {
+                errorMessage = "\(result.sourceName) is offline. Reconnect it to reveal the original file."
+                return
+            }
+            path = result.path
+        }
+        do {
+            try revealer(URL(fileURLWithPath: path))
+            dismiss?()
+        } catch {
+            errorMessage = "Could not reveal this item in Finder. \(error.localizedDescription)"
+        }
+    }
+
+    private static func revealSystemURL(_ url: URL) throws {
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw NSError(domain: NSCocoaErrorDomain, code: NSFileNoSuchFileError,
+                          userInfo: [NSLocalizedDescriptionKey: "The item is no longer available. Reconnect its source or refresh the search."])
+        }
+        NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 
     private static func openSystemItem(_ item: QuickSearchItem, completion: @escaping (Error?) -> Void) {
