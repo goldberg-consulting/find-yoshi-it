@@ -10,6 +10,33 @@ Your files stay where you put them. Search, OCR, embeddings, and the index stay 
 
 [**Download the latest release**](https://github.com/goldberg-consulting/find-yoshi-it/releases/latest) · macOS 14+ · Release downloads currently target Apple silicon
 
+## Install with Homebrew. Keep the receipts, lose the hunting.
+
+```sh
+brew install --cask goldberg-consulting/tap/find-yoshi-it
+```
+
+When a new version lands:
+
+```sh
+brew update
+brew upgrade --cask find-yoshi-it
+```
+
+Already running the same version from `~/Applications`? Let Homebrew adopt it:
+
+```sh
+brew install --cask --adopt --appdir="$HOME/Applications" goldberg-consulting/tap/find-yoshi-it
+```
+
+Adoption requires an identical app bundle; it does not overwrite a different build.
+Upgrades retain your existing index and preferences. The cask also leaves the library
+intact when uninstalled—two million indexed files deserve better than a dramatic exit.
+
+Requires Apple silicon and macOS 14+. Current releases are ad-hoc signed, not notarized;
+if macOS blocks first launch, review it in System Settings → Privacy & Security.
+The tap checks for stable releases every 30 minutes, subject to GitHub scheduling delays.
+
 ## Command–Space. Summon the thing.
 
 Press **Command–Space**, type a name or query, use the arrow keys to select a result, and press **Return** to open it. **Escape** closes the panel. **Right-click a result → Reveal in Finder** takes you to the actual file or app without opening it. This also works for individual copies in expanded location/version groups.
