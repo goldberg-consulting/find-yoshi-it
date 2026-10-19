@@ -36,7 +36,11 @@ final class AppModel: ObservableObject {
 
     @Published private(set) var homeNetworkName = NetworkSettings().homeNetworkName
 
-    init(applications: ApplicationCatalog = ApplicationCatalog()) { self.applications = applications }
+    init(applications: ApplicationCatalog = ApplicationCatalog(),
+         previewLoader: ((SearchResult) async throws -> [Passage])? = nil) {
+        self.applications = applications
+        self.previewLoader = previewLoader
+    }
 
     func saveHomeNetworkName(_ name: String) {
         var settings = NetworkSettings()
@@ -56,6 +60,8 @@ final class AppModel: ObservableObject {
     private var nameReader: SearchEngine?
     private var contentReader: SearchEngine?
     private var previewReader: SearchEngine?
+    private let previewLoader: ((SearchResult) async throws -> [Passage])?
+    private var readerFileID: Int64?
     private var searchTask: Task<Void, Never>?
     private var applicationSearchTask: Task<Void, Never>?
     private var readerTask: Task<Void, Never>?
@@ -607,7 +613,8 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func loadReader() {
+    @discardableResult
+    func loadReader() -> Task<Void, Never> {
         readerTask?.cancel()
         let result = selectedResult
         readerTask = Task { [weak self] in
@@ -615,15 +622,32 @@ final class AppModel: ObservableObject {
             // after that transaction, and only if this selection is still current.
             await Task.yield()
             guard !Task.isCancelled, let self, self.selectedResult == result else { return }
-            self.passages = result?.passages ?? []
-            self.relatedResults = []
-            self.selectedPassageID = result?.passages.first?.id
-            guard let result, let engine = self.previewReader else { return }
+            let canShowContent = result.map {
+                $0.status != .denied && ($0.availability != .offline || $0.offlineContentAllowed)
+            } ?? false
+            // Search refreshes carry only matching snippets. Keep the full preview and
+            // reader position until its replacement arrives for the same document.
+            if self.readerFileID != result?.fileID || !canShowContent {
+                self.passages = canShowContent ? (result?.passages ?? []) : []
+                self.relatedResults = []
+                self.selectedPassageID = self.passages.first?.id
+            }
+            self.readerFileID = result?.fileID
+            guard let result, canShowContent else { return }
             do {
-                let loaded = try await engine.preview(fileID: result.fileID, matchingPassageID: result.passages.first?.id)
+                let loaded: [Passage]
+                if let loader = self.previewLoader {
+                    loaded = try await loader(result)
+                } else if let engine = self.previewReader {
+                    loaded = try await engine.preview(fileID: result.fileID, matchingPassageID: result.passages.first?.id)
+                } else { return }
                 guard !Task.isCancelled, self.selectedResult == result else { return }
                 self.passages = loaded
-                if self.selectedPassageID == nil { self.selectedPassageID = loaded.first?.id }
+                if !loaded.contains(where: { $0.id == self.selectedPassageID }) {
+                    let match = result.passages.first?.id
+                    self.selectedPassageID = loaded.first(where: { $0.id == match })?.id ?? loaded.first?.id
+                }
+                guard let engine = self.previewReader else { return }
                 let related: [SearchResult]
                 do { related = try await engine.related(fileID: result.fileID) }
                 catch SearchInterruption.timedOut { return } // Optional suggestions must not block the preview.
@@ -634,6 +658,7 @@ final class AppModel: ObservableObject {
                 self.errorMessage = error.localizedDescription
             }
         }
+        return readerTask!
     }
 
     func open(_ result: SearchResult) {
